@@ -112,8 +112,10 @@ h1 { margin: 0; font-size: clamp(32px, 4.3vw, 54px); line-height: 1.1; letter-sp
 .camera-guides span:nth-child(2) { right: -1px; top: -1px; border-width: 2px 2px 0 0; }
 .camera-guides span:nth-child(3) { right: -1px; bottom: -1px; border-width: 0 2px 2px 0; }
 .camera-guides span:nth-child(4) { left: -1px; bottom: -1px; border-width: 0 0 2px 2px; }
-.camera-controls { min-height: 90px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.button-camera-upload { padding: 0 15px; border-color: rgba(255,255,255,.28); color: white; cursor: pointer; }
+.camera-controls { min-height: 90px; display: grid; grid-template-columns: minmax(0, 1fr) 68px minmax(0, 1fr); align-items: center; gap: 12px; }
+.button-camera-upload { width: auto; max-width: 100%; min-width: 0; padding: 0 10px; border-color: rgba(255,255,255,.28); color: white; cursor: pointer; white-space: nowrap; }
+#camera-image-picker + .shutter-button { justify-self: center; }
+.flip-camera-button { justify-self: end; }
 .shutter-button { width: 68px; height: 68px; flex: 0 0 68px; border: 3px solid white; border-radius: 50%; display: grid; place-items: center; background: transparent; }
 .shutter-button span { width: 52px; height: 52px; border-radius: 50%; background: white; transition: transform .12s ease; }
 .shutter-button:active span { transform: scale(.9); }
@@ -158,7 +160,7 @@ h1 { margin: 0; font-size: clamp(32px, 4.3vw, 54px); line-height: 1.1; letter-sp
   .camera-screen { min-height: calc(100svh - 122px); margin: 10px -16px 14px; padding: 18px 16px 12px; border-radius: 0; }
   .camera-frame { min-height: 50svh; margin-top: 13px; }
   .camera-controls { min-height: 88px; }
-  .button-camera-upload { min-height: 44px; font-size: 12px; }
+  .button-camera-upload { width: 100%; min-height: 44px; font-size: 12px; }
   .shutter-button { width: 64px; height: 64px; flex-basis: 64px; }
   .shutter-button span { width: 48px; height: 48px; }
   .control-spacer { width: 86px; }
@@ -168,8 +170,8 @@ h1 { margin: 0; font-size: clamp(32px, 4.3vw, 54px); line-height: 1.1; letter-sp
   .button-large { min-height: 52px; }
   .action-row { gap: 8px; }
   .action-row .button { font-size: 12px; }
-  .camera-controls { gap: 6px; }
-  .button-camera-upload { padding: 0 10px; }
+  .camera-controls { grid-template-columns: minmax(0, 1fr) 64px minmax(0, 1fr); gap: 6px; }
+  .button-camera-upload { padding: 0 6px; font-size: 11px; }
   .control-spacer { width: 75px; }
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; } }
