@@ -1,2 +1,24 @@
 __pycache__
 .venv
+
+# secrets - never commit
+.env
+.env.*
+!.env.example
+
+# real photos / fixtures - never commit
+test_fixtures/
+
+# generated test artifacts (before/after images, output scans)
+tests/_artifacts/
+
+# local config
+android/local.properties
+*.local
+
+# toolchain downloads / sdk
+*.zip
+
+# React Native prototype (app/) - superseded by the Phase C PWA in web/.
+# Kept on disk, out of git. Say the word and I'll delete it instead.
+app/
