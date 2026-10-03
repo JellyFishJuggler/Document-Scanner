@@ -187,11 +187,11 @@ function base64ToBlob(base64, mime) {
 
 function showPreview(result) {
   if (downloadUrl) URL.revokeObjectURL(downloadUrl);
-  const blob = base64ToBlob(result.warped_b64, result.warped_mime);
+  const blob = base64ToBlob(result.scan_b64, 'image/png');
   downloadUrl = URL.createObjectURL(blob);
   elements['result-image'].src = downloadUrl;
   elements['download-button'].href = downloadUrl;
-  elements['download-button'].download = formatDownloadName();
+  elements['download-button'].download = formatDownloadName().replace(/\.jpg$/, '.png');
   setError(elements['preview-error']);
   showScreen(elements['preview-screen']);
 }
