@@ -195,7 +195,7 @@ nahi kar sakte.
   "image": "<base64 JPEG ya PNG>",
   "preset": "clean_white",
   "shadow_removal": true,
-  "output_format": "jpeg",
+  "output": "jpeg",
   "quality": null
 }
 ```
@@ -205,8 +205,11 @@ nahi kar sakte.
 | `image` | - | base64 JPEG/PNG. **required** |
 | `preset` | `"original"` | ek neeche diya hua list |
 | `shadow_removal` | `false` | desk shadow / uneven lighting hatao (kisi bhi preset ke saath) |
-| `output_format` | `"jpeg"` | `"jpeg"` (chhota) ya `"png"` (lossless) |
+| `output` | `"jpeg"` | `"jpeg"` (chhota) ya `"png"` (lossless) |
 | `quality` | `90` | JPEG quality 10-100. PNG par ignore hota hai. |
+
+`output_format` bhi accept hota hai, par **deprecated** alias hai - naya code
+`output` bheje. Dono ek saath aur alat-alat aaye to **422**.
 
 | Preset | Output |
 |---|---|
@@ -227,50 +230,103 @@ Response:
   "channels": 1,
   "preset": "clean_white",
   "shadow_removal": true,
+  "output": "jpeg",
   "source_size": [800, 450],
   "timing_ms": {
-    "body_read": 0.06, "b64_decode": 0.04, "decode": 7.9,
-    "enhance": 24.53, "encode": 1.03, "total": 33.66
+    "body_read": 0.36, "b64_decode": 0.39, "decode": 28.12,
+    "shadow": 205.64, "preset": 31.69,
+    "enhance": 240.36, "encode": 5.58, "total": 275.06
   }
 }
 ```
 
+`timing_ms` me har stage alag hai: `body_read`, `b64_decode`, `decode`, **`shadow`**
+(background estimation), **`preset`** (actual filter), `encode`, `total`. `enhance`
+= `shadow` + `preset` (Phase A compatibility). Ye zaroori hai - `clean_white` par
+255ms me se ~205ms sirf background estimation me jaata hai, aur client ko ye
+distinction dikhni chahiye.
+
 **`bw` ke saath ek honest baat.** Algorithm ka output strictly 0/255 hai, par
 default JPEG output lossy hai - har hard black/white edge par ringing aake
 intermediate values (0-14, 240-255) bana deti hai. Agar client ko byte-exact
-0/255 chahiye to `output_format: "png"` bhejo. Test dono verify karta hai.
+0/255 chahiye to `output: "png"` bhejo. Test dono verify karta hai.
 
 **`clean_white` crease elimination nahi karta.** Wo sirf roshni ka variation flat
 karta hai (background division). Ek sharp diagonal fold jo lighting nahi,
 geometry hai, usse poori tarah nahi mita - isliye claim bhi nahi kiya jaata.
 
-### Shadow removal kitna kaam karta hai
+### Shadow removal: kya test hota hai, aur uski limit
 
-Synthetic page, linear illumination gradient, background patch ka measured
-standard deviation (jitna kam, utna flat):
+**Sirf is synthetic test fixture par**, background standard deviation
+**15.71 se 0.00** hua. Isse zyada kuch claim nahi kiya jaata - neeche poori
+construction likhi hai taaki aap judge kar sakein ki ye number kitna
+representative hai.
 
-| | background std-dev | mean |
-|---|---|---|
-| before | 15.71 | 201.50 |
-| after | **0.00** | 253.00 |
+Fixture (poori tarah synthetic, koi photo nahi):
 
-Poora gradient khatam. Ye number `tests/test_enhance.py` har run par nikalta
-hai - "dikhne mein behtar" nahi, actual measurement.
+- Canvas `1600x1100`. Background ek **horizontal linear ramp**:
+  `ramp[i] = linspace(234, 170, 1600)`, yaani column `x` ka har pixel same value
+  hai (`234 - x * 64 / 1599`), aur wahi value teeno BGR channels me.
+  Yani roshni **dheere dheere left se right** kam hoti hai, total 64 levels.
+- Ink uske upar draw kiya gaya: title "QUARTERLY REPORT" (~y=190), ek rule
+  (y=250), aur 15 text rows `y=330..756` - sab `x in [150, 1450]` ke andar.
 
-### Timings (2000px long side, median of 3)
+Measurement (std-dev jis pixels par nikalte hain):
 
-| Preset | decode | enhance | encode | total |
-|---|---|---|---|---|
-| `original` | 28.0 | 0.3 | 7.5 | 38.5 |
-| `grayscale` | 28.3 | 0.9 | 5.1 | 36.0 |
-| `bw` | 28.2 | 4.7 | 4.2 | 38.8 |
-| `bw_adaptive` | 26.4 | 20.9 | 4.5 | 54.0 |
-| `clean_white` | 27.2 | **219.0** | 4.3 | **252.5** |
+- Grayscale image ke rows `y=776..1084`, columns `x=120..1479` - ek
+  `1360x309` px patch.
+- Ye patch **poori tarah text se neeche** hai (last ink row `y=764`), isiliye
+  usme sirf paper hai. Test ye khud verify karta hai: Otsu us box me
+  `0.000%` ink deta hai.
+- `numpy` float32 par us patch ka `mean()` aur `std()`.
 
-Do baatein client ke liye: `decode` har request mein sabse bada fixed cost hai,
-aur `clean_white` 2000px par aadha second leta hai (background estimate ke liye
-bade morphological kernel). Isiliye "Processing document..." state zaroori hai -
-progress percentage fake nahi karni.
+Result: mean `201.50 → 253.00`, std-dev `15.71 → 0.00`.
+
+**Iska matlab ye nahi ki asli shadows hamesha zero ho jaayenge.** Ye ek
+controlled, perfectly linear, perfectly smooth gradient hai. Asli photos me
+chhoti high-frequency texture, camera noise, paper ka grain, aur **crease**
+(shadow nahi, geometry) hota hai - aur crease ko ye method flatten nahi karta.
+Real photo par measured improvement bahut chhota hota hai (fixture test:
+background std `9.68 → 7.41`). `clean_white` par bhi ye honest limit wahi hai:
+wo roshni ka variation flat karta hai, crease nahi.
+
+### Timings: 2000x1375, 3 runs ka average
+
+Sab stage server-side alag-alag measure hote hain. `shadow_removal` off:
+
+| Preset | decode | shadow | preset | encode | total |
+|---|---|---|---|---|---|
+| `original` | 32.8 | 0.0 | 0.0 | 7.2 | **41.6** |
+| `grayscale` | 28.2 | 0.0 | 0.5 | 4.5 | **34.5** |
+| `bw` | 28.1 | 0.0 | 3.6 | 4.7 | **38.2** |
+| `bw_adaptive` | 29.2 | 0.0 | 22.2 | 4.4 | **57.4** |
+| `clean_white` | 29.8 | 0.0 | **240.9** | 4.7 | **280.2** |
+
+`shadow_removal=true`:
+
+| Preset | decode | shadow | preset | encode | total |
+|---|---|---|---|---|---|
+| `original` | 31.4 | **214.6** | 0.0 | 7.1 | **254.7** |
+| `grayscale` | 28.1 | **204.9** | 0.5 | 4.6 | **240.3** |
+| `bw` | 28.5 | **208.4** | 3.0 | 5.1 | **246.3** |
+| `bw_adaptive` | 28.4 | **209.7** | 24.5 | 4.7 | **274.4** |
+| `clean_white` | 28.1 | 205.6 | 31.7 | 5.6 | **275.1** |
+
+(`body_read` ~0.4ms aur `b64_decode` ~0.5ms dono rows me - network/parse
+overhead, in tables se chhata kar diya hai.)
+
+Teen baatein client ke liye:
+
+1. `decode` har request ka sabse bada **fixed** cost hai (~28-33ms), chahe filter
+   koi bhi ho.
+2. Background estimation **~205-215ms** leti hai - ye morphological close +
+   divide hai. `clean_white` isliye default mein `shadow=false` par bhi slow hai:
+   apna background estimation khud karta hai (240ms `preset` stage me).
+3. `clean_white` + `shadow_removal=true` double work nahi karta: preset stage
+   31.7ms rehta hai kyunki pehle wala shadow step already flat kar chuka hai.
+
+Isiliye "Processing document..." state zaroori hai - **progress percentage fake
+nahi karni.**
 
 ### CORS
 
@@ -295,7 +351,7 @@ karta hai (`Origin` + `Access-Control-Request-*` headers bhejkar preflight).
 | `401` | `X-API-Key` missing ya galat |
 | `413` | body 12MB se badi, **ya** image `MAX_DECODED_PIXELS` se zyada |
 | `415` | format JPEG/PNG nahi hai |
-| `422` | body galat, ya `method`/`max_side`/`preset`/`output_format`/`quality`/`corners` invalid |
+| `422` | body galat, ya `method`/`max_side`/`preset`/`output`/`quality`/`corners` invalid |
 | `429` | 30 requests/minute cross |
 | `503` | server busy (30s me slot nahi mila) |
 
@@ -409,7 +465,7 @@ SCANLY_TEST_URL=http://127.0.0.1:18001 .venv/bin/python tests/test_cors.py
 
 Rate limit 30/min **per API key** hai, isliye do suites ke beech container restart
 karna padta hai - warna `429` aa jaayenge. `scanly-test-b` sirf bulk functional
-Phase B suites ke liye hai (corners 54 + enhance 64 + cors 27 assertions); wahan
+Phase B suites ke liye hai (corners 54 + enhance 140 + cors 27 assertions); wahan
 limit relaxed hai taaki ek suite na toot jaye. Default 30/min production behaviour
 `test_api.py`/`test_review.py` mein alag container par verify hota hai.
 

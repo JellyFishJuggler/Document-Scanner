@@ -377,11 +377,22 @@ def enhance(img, preset="original", shadow_removal=False):
 
     shadow_removal - upar wala desk-shadow removal, kisi bhi preset ke saath.
 
-    Return dict: {"image": ndarray, "channels": int}
+    Return dict: {"image": ndarray, "channels": int, "timing_ms": dict}
     `channels` 1 hoga grayscale/bw pe, 3 baaki me - client ko encoding ke liye
     chahiye.
+
+    `timing_ms` me `shadow_ms` aur `preset_ms` alag hain, warna client ko
+    pata hi nahi chalega ki 250ms me se 219ms background estimate me gaya
+    ya actual filter me.
     """
-    work = remove_shadow(img) if shadow_removal else img
+    import time as _time
+
+    t0 = _time.perf_counter()
+    if shadow_removal:
+        work = remove_shadow(img)
+    else:
+        work = img
+    t1 = _time.perf_counter()
 
     if preset == "original":
         out = work
@@ -396,10 +407,12 @@ def enhance(img, preset="original", shadow_removal=False):
             gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 10
         )
     elif preset == "clean_white":
-        # Pehle lighting flat karo (guaranteed), phir se paper ko white push
-        # karne ke liye percentiles stretch karo - fixed threshold nahi, isiliye
-        # halki grey paper bhi white ho jaati hai bina text khoye.
-        flat = remove_shadow(work)
+        # Ye preset khud apna lighting flat karta hai (background estimate ke
+        # liye bada morphological kernel), isiliye `shadow_removal=False` par
+        # bhi ye step chalta hai. Agar client ne `shadow_removal=True` bheja
+        # tha to upar wala `work` already flat hai - dobara estimate karna
+        # quantization error laata hai bina kuch sudhare.
+        flat = work if shadow_removal else remove_shadow(img)
         gray = cv2.cvtColor(flat, cv2.COLOR_BGR2GRAY)
         lo, hi = np.percentile(gray, (2, 98))
         if hi - lo < 1:  # khaali/flat page - stretch mat karo
@@ -412,6 +425,16 @@ def enhance(img, preset="original", shadow_removal=False):
             f"unknown preset: {preset!r} (use 'original', 'grayscale', 'bw', "
             f"'bw_adaptive' ya 'clean_white')"
         )
+    t2 = _time.perf_counter()
 
     channels = 1 if out.ndim == 2 else out.shape[2]
-    return {"image": out, "channels": channels}
+    return {
+        "image": out,
+        "channels": channels,
+        "timing_ms": {
+            "shadow": (t1 - t0) * 1000,
+            "preset": (t2 - t1) * 1000,
+            # clean_white apna background estimation preset stage me karta hai,
+            # isiliye uska `preset` time naturally bada hota hai.
+        },
+    }

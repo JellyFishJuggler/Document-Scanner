@@ -49,7 +49,7 @@ import numpy as np
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ValidationError, model_validator
 from starlette.concurrency import run_in_threadpool
 
 from scanner import binarize, enhance, prepare_page, validate_corners
@@ -392,8 +392,28 @@ class EnhanceRequest(BaseModel):
     # Output format. JPEG chhota hai (photos ke liye behtar), PNG lossless hai.
     # Default JPEG quality 90 ke saath - document photos me visually lossless
     # ke qareeb, par aadhi se bhi kam bytes.
-    output_format: Literal["jpeg", "png"] = "jpeg"
+    #
+    # Naam `output` hai, `output_format` nahi - yahi agreed Phase B contract
+    # hai. `output_format` purana spelling hai; koi purana client na tootey,
+    # isliye woh deprecated alias ke roop me bhi accept hota hai. Dono ek saath
+    # bheje jaane par `output` jeetta hai.
+    output: Literal["jpeg", "png"] = "jpeg"
+    output_format: Literal["jpeg", "png"] | None = None
     quality: int | None = None
+
+    @model_validator(mode="after")
+    def _resolve_output(self) -> "EnhanceRequest":
+        if self.output_format is not None:
+            object.__setattr__(self, "_deprecated_used", True)
+            if self.output_format != self.output and self.output != "jpeg":
+                # Dono alat-alat aur `output` explicitly non-default hai to
+                # unclear hai - client ki galti batayein.
+                raise ValueError(
+                    "output aur output_format dono alag-alag diye gaye hain; "
+                    "sirf 'output' use karo (output_format deprecated hai)"
+                )
+            object.__setattr__(self, "output", self.output_format)
+        return self
 
 
 @app.get("/health")
@@ -539,7 +559,7 @@ async def enhance_endpoint(
     security surface dono me identical hai.
 
     Request:  {"image": "<b64>", "preset": "bw", "shadow_removal": false,
-               "output_format": "jpeg"}
+               "output": "jpeg"}
     Response: {"ok": true, "image_b64": ..., "mime": ..., "size": [w, h],
                "channels": 1|3, "preset": ..., "shadow_removal": ..., "timing_ms": {...}}
     """
@@ -573,9 +593,10 @@ async def enhance_endpoint(
             enhance, decoded, preset=payload.preset, shadow_removal=payload.shadow_removal
         )
         proc_ms = (time.perf_counter() - t_proc) * 1000
+        stage_ms = result["timing_ms"]
 
         t_enc = time.perf_counter()
-        if payload.output_format == "png":
+        if payload.output == "png":
             b64, mime = await run_in_threadpool(encode_png_raw, result["image"])
         else:
             q = payload.quality if payload.quality is not None else 90
@@ -589,10 +610,16 @@ async def enhance_endpoint(
         _scan_slots.release()
 
     out = result["image"]
+    # Stage timings alag-alag: `shadow` = background estimation,
+    # `preset` = actual filter (clean_white me background estimation bhi
+    # preset stage me girti hai, isiliye uska preset time bada hota hai).
+    # `enhance` = dono ka total, Phase A style back-compat ke liye.
     timing = {
         "body_read": round((t_body_done - t_start) * 1000, 2),
         "b64_decode": timings["b64_decode"],
         "decode": timings["decode"],
+        "shadow": round(stage_ms["shadow"], 2),
+        "preset": round(stage_ms["preset"], 2),
         "enhance": round(proc_ms, 2),
         "encode": round(encode_ms, 2),
         "total": round((time.perf_counter() - t_start) * 1000, 2),
@@ -620,6 +647,7 @@ async def enhance_endpoint(
             "channels": result["channels"],
             "preset": payload.preset,
             "shadow_removal": payload.shadow_removal,
+            "output": payload.output,
             "source_size": [src_w, src_h],
             "timing_ms": timing,
         }

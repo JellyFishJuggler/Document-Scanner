@@ -22,6 +22,7 @@ Run:  SCANLY_TEST_URL=http://127.0.0.1:18001 .venv/bin/python tests/test_enhance
 """
 import base64
 import json
+import os
 import sys
 import time
 import urllib.error
@@ -127,10 +128,20 @@ print("=" * 74)
 page = gradient_page()
 page_b64 = b64(page)
 m_before, s_before = bg_stats(page, BOX)
-print(f"  synthetic page {page.shape[1]}x{page.shape[0]}")
-print(f"  illumination gradient 234 -> 170 across the width")
-print(f"  text occupies y<{LAST_TEXT_Y}; measurement box {BOX} is below it (pure background)")
+print(f"  FIXTURE CONSTRUCTION (fully synthetic, no photo anywhere):")
+print(f"    canvas {page.shape[1]}x{page.shape[0]}, background = a horizontal linear ramp")
+print(f"      ramp[i] = linspace(234, 170, w), so column x is uniformly "
+      f"234 - x*64/{page.shape[1] - 1}  (x=0 -> 234.0, x={page.shape[1] - 1} -> 170.0)")
+print(f"      tiled down all rows and replicated to 3 identical BGR channels")
+print(f"    ink drawn ON TOP: title 'QUARTERLY REPORT' at y~190, a rule at y=250,")
+print(f"      15 text rows y=330..756, all inside x in [150, 1450]")
+print(f"  MEASUREMENT REGION (what the std-dev is computed over):")
+print(f"    rows y={BOX[1]}..{BOX[3]-1}, cols x={BOX[0]}..{BOX[2]-1} of the GRAYSCALE image")
+print(f"      -> {BOX[2]-BOX[0]}x{BOX[3]-BOX[1]} px, entirely below the last ink row (y={LAST_TEXT_Y})")
+print(f"    stats = numpy mean/std of those pixels as float32")
 print(f"  background before: mean={m_before:7.2f}  std={s_before:7.3f}")
+print(f"  SCOPE: this is ONE synthetic fixture with ONE smooth linear gradient. It is")
+print(f"  not evidence about real desk shadows, creases, or curved pages.")
 # Prove the box really is background - Otsu finds no ink inside it.
 _gray = cv2.cvtColor(page, cv2.COLOR_BGR2GRAY)
 _bw = cv2.threshold(_gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
@@ -158,8 +169,39 @@ if st == 200:
     check("original is visually unchanged (mean abs diff < 6)", diff < 6.0, f"{diff:.2f}")
 
 print()
-print("4. grayscale is single channel")
+print("3b. the `output` field is the contract name (output_format is deprecated)")
+# The agreed Phase B contract says the field is `output`. `output_format` is
+# only kept as an alias so no older client breaks - but `output` is what the
+# docs promise and what new code should send.
+st, r = post("/enhance", {"image": page_b64, "preset": "grayscale", "output": "png"})
+check("output=png -> 200", st == 200, f"got {st}")
+if st == 200:
+    check("output=png returns image/png", r["mime"] == "image/png", r["mime"])
+    check("response echoes `output`", r.get("output") == "png", str(r.get("output")))
+
+st, r = post("/enhance", {"image": page_b64, "preset": "grayscale"})
+check("output omitted -> default jpeg", st == 200 and r["mime"] == "image/jpeg",
+      f"got {st} {r.get('mime')}")
+if st == 200:
+    check("response echoes default `output`=jpeg", r.get("output") == "jpeg",
+          str(r.get("output")))
+
 st, r = post("/enhance", {"image": page_b64, "preset": "grayscale", "output_format": "png"})
+check("deprecated output_format=png still works -> 200", st == 200, f"got {st}")
+if st == 200:
+    check("deprecated alias produces image/png", r["mime"] == "image/png", r["mime"])
+
+st, r = post("/enhance", {"image": page_b64, "preset": "grayscale",
+                          "output_format": "png", "output": "png"})
+check("deprecated alias agrees with `output` -> 200", st == 200, f"got {st}")
+
+st, r = post("/enhance", {"image": page_b64, "preset": "grayscale",
+                          "output": "png", "output_format": "jpeg"})
+check("contradictory output/output_format -> 422", st == 422, f"got {st}")
+
+print()
+print("4. grayscale is single channel")
+st, r = post("/enhance", {"image": page_b64, "preset": "grayscale", "output": "png"})
 check("status 200", st == 200, f"got {st}")
 if st == 200:
     im = decode(r)
@@ -178,7 +220,7 @@ print("5. bw contains only 0 and 255")
 # values (0-14 and 240-255 in the measured run below). So the strict assertion
 # only holds for a lossless container. Both are checked; the JPEG number is
 # reported rather than hidden.
-st, r = post("/enhance", {"image": page_b64, "preset": "bw", "output_format": "png"})
+st, r = post("/enhance", {"image": page_b64, "preset": "bw", "output": "png"})
 check("status 200", st == 200, f"got {st}")
 if st == 200:
     im = decode(r)
@@ -201,7 +243,7 @@ if st == 200:
 
 print()
 print("6. bw_adaptive returns a valid image")
-st, r = post("/enhance", {"image": page_b64, "preset": "bw_adaptive", "output_format": "png"})
+st, r = post("/enhance", {"image": page_b64, "preset": "bw_adaptive", "output": "png"})
 check("status 200", st == 200, f"got {st}")
 if st == 200:
     im = decode(r)
@@ -221,8 +263,8 @@ if st == 200:
     # solid black slab.
     severe = gradient_page(lo=90, hi=245)
     sb = b64(severe)
-    st2, r2 = post("/enhance", {"image": sb, "preset": "bw", "output_format": "png"})
-    st3, r3 = post("/enhance", {"image": sb, "preset": "bw_adaptive", "output_format": "png"})
+    st2, r2 = post("/enhance", {"image": sb, "preset": "bw", "output": "png"})
+    st3, r3 = post("/enhance", {"image": sb, "preset": "bw_adaptive", "output": "png"})
     if st2 == 200 and st3 == 200:
         otsu_s, adap_s = decode(r2), decode(r3)
         d = float((adap_s.astype(np.float32) != otsu_s.astype(np.float32)).mean())
@@ -297,7 +339,9 @@ for name, body in (
     ("quality 0", {"quality": 0}),
     ("quality 101", {"quality": 101}),
     ("shadow_removal not a bool", {"shadow_removal": "yes please"}),
-    ("output_format bogus", {"output_format": "tiff"}),
+    ("output bogus", {"output": "tiff"}),
+    ("output_format bogus (deprecated name)", {"output_format": "tiff"}),
+    ("output and output_format disagree", {"output": "png", "output_format": "jpeg"}),
 ):
     st, rr = post("/enhance", {"image": page_b64, **body})
     check(f"422  {name}", st == 422, f"got {st}")
@@ -354,20 +398,57 @@ for p in PRESETS:
               f"encode {t['encode']:6.2f}  total {t['total']:7.2f}   (ms, median of 3)")
 check("all five presets report timings", len(timings) == 5, f"{sorted(timings)}")
 
-# 2000px exactly
+# --- the timing table the brief asked for, at ~2000px, 3-run average ----------
+# Stages, all measured server-side and reported separately:
+#   body_read  - raw body read up to the 12MB cap
+#   b64_decode - base64 -> bytes
+#   decode     - bytes -> OpenCV ndarray
+#   shadow     - background estimation (0 when shadow_removal is off)
+#   preset     - the actual filter
+#   encode     - PNG/JPEG encode + base64
+#   total      - whole request
+# `enhance` = shadow + preset, kept for Phase A back-compat.
+STAGES = ("body_read", "b64_decode", "decode", "shadow", "preset", "enhance", "encode", "total")
 p2000 = cv2.resize(page, (2000, 1375), interpolation=cv2.INTER_AREA)
 p2000_b64 = b64(p2000)
-print(f"     --- at exactly 2000px long side ({p2000.shape[1]}x{p2000.shape[0]}) ---")
+print(f"     --- exactly 2000px long side ({p2000.shape[1]}x{p2000.shape[0]}), "
+      f"3 runs averaged ---")
+print(f"     {'preset':14s} {'shadow_rem':>10s} " + " ".join(f"{k:>9s}" for k in STAGES))
+avg2000 = {}
 for p in PRESETS:
-    runs = []
-    for _ in range(3):
-        st, rr = post("/enhance", {"image": p2000_b64, "preset": p})
-        if st == 200:
-            runs.append(rr["timing_ms"])
-    if runs:
-        t = runs[len(runs) // 2]
-        print(f"     {p:14s} decode {t['decode']:7.2f}  enhance {t['enhance']:7.2f}  "
-              f"encode {t['encode']:6.2f}  total {t['total']:7.2f}   (ms, median of 3)")
+    for sr in (False, True):
+        runs = []
+        for _ in range(3):
+            st, rr = post("/enhance", {"image": p2000_b64, "preset": p, "shadow_removal": sr})
+            if st == 200:
+                runs.append(rr["timing_ms"])
+        if not runs:
+            check(f"timing {p} shadow_removal={sr} returned 200", False)
+            continue
+        avg = {k: sum(r[k] for r in runs) / len(runs) for k in STAGES}
+        avg2000[(p, sr)] = avg
+        print(f"     {p:14s} {str(sr):>10s} " + " ".join(f"{avg[k]:9.2f}" for k in STAGES))
+
+# The stages must add up to something sane - otherwise "shadow"/"preset" are
+# just decoration and the numbers mean nothing.
+for (p, sr), avg in avg2000.items():
+    inner = avg["shadow"] + avg["preset"]
+    check(f"{p} shadow+preset == enhance ({sr})", abs(inner - avg["enhance"]) < avg["enhance"] * 0.05 + 2.0,
+          f"{inner:.2f} vs {avg['enhance']:.2f}")
+    check(f"{p} stages <= total ({sr})", avg["encode"] + avg["enhance"] <= avg["total"] + 5.0,
+          f"encode {avg['encode']:.2f} + enhance {avg['enhance']:.2f} = "
+          f"{avg['encode'] + avg['enhance']:.2f} vs total {avg['total']:.2f}")
+check("shadow_removal=False reports ~0 shadow time",
+      all(avg2000[(p, False)]["shadow"] < 1.0 for p in PRESETS),
+      f"{[round(avg2000[(p, False)]['shadow'], 2) for p in PRESETS]}")
+check("shadow_removal=True costs real time on original",
+      avg2000[("original", True)]["shadow"] > avg2000[("original", False)]["shadow"] + 5.0,
+      f"{avg2000[('original', False)]['shadow']:.2f} -> "
+      f"{avg2000[('original', True)]['shadow']:.2f}")
+check("clean_white's preset stage carries its own background estimation",
+      avg2000[("clean_white", False)]["preset"] > avg2000[("grayscale", False)]["preset"] * 5,
+      f"clean_white {avg2000[('clean_white', False)]['preset']:.2f} vs "
+      f"grayscale {avg2000[('grayscale', False)]['preset']:.2f}")
 
 print()
 print("   8e. artifacts written (NOT committed)")
@@ -377,6 +458,7 @@ artifacts = []
 def artifact(img, name):
     a = save(img, name)
     artifacts.append((name, a))
+    return a
 
 
 artifact(page, "00_source_gradient_page.png")
@@ -408,18 +490,59 @@ if phone.exists():
         wb = b64(warped)
         wbox = (20, warped.shape[0] - 90, warped.shape[1] - 20, warped.shape[0] - 20)
         wm0, ws0 = bg_stats(warped, wbox)
+        expect_ch = {"original": 3, "grayscale": 1, "bw": 1, "bw_adaptive": 1, "clean_white": 1}
         for p in PRESETS:
             st2, rr2 = post("/enhance", {"image": wb, "preset": p, "shadow_removal": True})
-            ok2 = st2 == 200
-            if ok2:
-                im2 = decode(rr2)
-                artifact(im2, f"11_phone_{p}_shadow_removed.png")
-                print(f"     {p:14s} timing_ms {rr2['timing_ms']}")
-            check(f"  phone_photo /enhance '{p}' -> 200", ok2, f"got {st2}")
+            check(f"phone_photo /enhance '{p}' + shadow_removal -> 200", st2 == 200, f"got {st2}")
+            if st2 != 200:
+                continue
+            im2 = decode(rr2)
+            # "valid image" - actually decoded, not just a 200.
+            check(f"  '{p}' response decodes to an image", im2 is not None and im2.size > 0,
+                  f"{None if im2 is None else im2.shape}")
+            if im2 is None:
+                continue
+            check(f"  '{p}' full page size preserved",
+                  im2.shape[:2] == warped.shape[:2],
+                  f"{im2.shape[1]}x{im2.shape[0]} vs {warped.shape[1]}x{warped.shape[0]}")
+            check(f"  '{p}' channels == {expect_ch[p]}", rr2["channels"] == expect_ch[p],
+                  str(rr2["channels"]))
+            check(f"  '{p}' array rank matches the channel count",
+                  (im2.ndim == 2) == (rr2["channels"] == 1),
+                  f"ndim={im2.ndim} channels={rr2['channels']}")
+            check(f"  '{p}' not a blank canvas", float(np.std(im2.astype(np.float32))) > 1.0,
+                  f"std={float(np.std(im2.astype(np.float32))):.2f}")
+            check(f"  '{p}' echoes preset and shadow_removal",
+                  rr2["preset"] == p and rr2["shadow_removal"] is True,
+                  f"preset={rr2['preset']} shadow={rr2['shadow_removal']}")
+            art = artifact(im2, f"11_phone_{p}_shadow_removed.png")
+            # The saved file must be re-readable too, not just the in-memory array.
+            back = cv2.imread(str(art), cv2.IMREAD_UNCHANGED)
+            check(f"  '{p}' artifact on disk re-decodes",
+                  back is not None and back.shape[:2] == warped.shape[:2],
+                  f"{None if back is None else back.shape}")
+            check(f"  '{p}' artifact is non-trivial on disk",
+                  back is not None and os.path.getsize(art) > 500,
+                  f"{os.path.getsize(art) if os.path.exists(art) else 0} bytes")
+            print(f"     {p:14s} {im2.shape[1]}x{im2.shape[0]} ch={rr2['channels']} "
+                  f"{os.path.getsize(art):>7d} B  shadow={rr2['timing_ms']['shadow']:6.2f} "
+                  f"preset={rr2['timing_ms']['preset']:6.2f} total={rr2['timing_ms']['total']:7.2f}")
+        # without shadow_removal the pipeline must also be valid
+        st3, rr3 = post("/enhance", {"image": wb, "preset": "clean_white", "shadow_removal": False})
+        check("phone_photo /enhance 'clean_white' WITHOUT shadow_removal -> 200",
+              st3 == 200, f"got {st3}")
+        if st3 == 200:
+            im3 = decode(rr3)
+            check("  no-shadow run also decodes to a full page",
+                  im3 is not None and im3.shape[:2] == warped.shape[:2],
+                  f"{None if im3 is None else im3.shape}")
         st2, rr2 = post("/enhance", {"image": wb, "preset": "original", "shadow_removal": True})
         if st2 == 200:
             wm1, ws1 = bg_stats(decode(rr2), wbox)
-            print(f"     phone background std: before {ws0:.3f} -> after {ws1:.3f}")
+            print(f"     phone background std over the box {wbox}: "
+                  f"before {ws0:.3f} -> after {ws1:.3f}")
+            print("     (real photo, real paper texture: a modest drop, NOT zero -")
+            print("      the synthetic gradient fixture is the only one that reaches 0.00)")
 else:
     print()
     print("   8f SKIP  test_fixtures/phone_photo.jpg missing")
