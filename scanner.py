@@ -14,6 +14,24 @@ import cv2
 import numpy as np
 
 
+def order_corners(pts):
+    """
+    Chaar corners ko TL/TR/BR/BL mein order karo - chahe client ne bheja ho
+    jis bhi order mein.
+
+    s = x + y sabse chota 'top left', sabse bada 'bottom right'
+    d = x - y sabse chota 'top right', sabse bada 'bottom left'
+
+    Client ke liye ye zaroori hai: Adjust Corners screen par user chaaro nodes
+    kisi bhi order mein drag kar sakta hai, aur Perspective transform ko corners
+    ka sequence chahiye warna page ulta-palata warp ho jaata hai.
+    """
+    pts = np.array(pts, dtype=np.float32).reshape(4, 2)
+    s = pts.sum(axis=1)
+    d = np.diff(pts, axis=1).ravel()
+    return pts[np.argmin(s)], pts[np.argmin(d)], pts[np.argmax(s)], pts[np.argmax(d)]
+
+
 def four_point_transform(img, pts):
 
     '''
@@ -35,9 +53,7 @@ def four_point_transform(img, pts):
 
     pts = np.array(pts, dtype=np.float32).reshape(4, 2)
     
-    s = pts.sum(axis=1)
-    d = np.diff(pts, axis=1).ravel()
-    tl, tr, br, bl = pts[np.argmin(s)], pts[np.argmin(d)], pts[np.argmax(s)], pts[np.argmax(d)]
+    tl, tr, br, bl = order_corners(pts)
 
     width = int(max(np.linalg.norm(tr - tl), np.linalg.norm(br - bl)))
     height = int(max(np.linalg.norm(bl - tl), np.linalg.norm(br - tr)))
@@ -177,3 +193,225 @@ def scan_image(img, max_side=None, method="otsu"):
         "contour": contour,
         "used_fallback": used_fallback,
     }
+
+
+# ---------------------------------------------------------------- corners
+
+def validate_corners(corners, tolerance=0.02):
+    """
+    Client ke bheje corners validate karo. ValueError raise hoti hai - API ise
+    422 me convert karti hai.
+
+    Rules (spec ke mutabiq):
+      - exactly 4 points, har ek [x, y]
+      - normalized [0, 1] ke andar. `tolerance` chhoti si galti maarta hai
+        (0.02 = 2000px image par 40px) - kyunki client ke normalized coords
+        round-trip mein kabhi-kabar 1.001 ya -0.001 ho jaate hain
+      - convex - concave quadrilateral perspective warp nahi deta
+      - area >= 5% of the frame - 4% wala crop matlab user ne galti se
+        almost kuch nahi select kiya
+
+    Returns the corners ordered TL/TR/BR/BL, dtype float32.
+    """
+    try:
+        pts = np.asarray(corners, dtype=np.float32)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"corners ko numbers ki list chahiye: {exc}") from exc
+
+    if pts.shape != (4, 2):
+        raise ValueError(f"corners me exactly 4 [x, y] points hone chahiye, mila shape {pts.shape}")
+
+    if not np.isfinite(pts).all():
+        raise ValueError("corners me NaN ya Infinity nahi ho sakta")
+
+    if pts.min() < -tolerance or pts.max() > 1 + tolerance:
+        raise ValueError(
+            f"corners normalized 0..1 ke andar hone chahiye, mila "
+            f"min={pts.min():.3f} max={pts.max():.3f}"
+        )
+
+    pts = np.clip(pts, 0.0, 1.0)
+
+    ordered = np.array(order_corners(pts), dtype=np.float32)
+
+    # Area canonical order me ginna zaroori hai. cv2.contourArea order-sensitive
+    # hai - bowtie (self-intersecting) order me ek bilkul valid quad ka area ~0
+    # aata hai aur wo 422 ho jaata. Client corners kisi bhi order me bhejta
+    # hai (Adjust Corners screen par drag sequence fixed nahi), isiliye area
+    # check order ke baad hi karna padta hai.
+    area = cv2.contourArea(ordered)
+    if area < 0.05:
+        raise ValueError(f"corners ka area {area:.1%} hai, kam se kam 5% chahiye")
+
+    # float32 me check karo, int32 me nahi. Corners normalized 0..1 hain - int32
+    # me cast karte hi sab 0 ya 1 ho jaate hain aur har valid quad "non-convex"
+    # report hota. Yeh shape (4, 2) bhi zaroori hai: OpenCV contour ko ya to
+    # Nx1x2 ya 1xNx2 chahta hai, Nx2 par shape mismatch error aata hai.
+    if not cv2.isContourConvex(ordered.reshape(-1, 1, 2)):
+        raise ValueError("corners convex quadrilateral nahi hain (ek corner bahar ya andar hai)")
+
+    return ordered
+
+
+def scale_corners(corners, width, height):
+    """
+    Normalized corners ko pixel coordinates me badal do.
+
+    `np.array(..., copy=True)` zaroori hai. `np.asarray` already-float32 array par
+    wahi object wapas deta hai, aur phir `pts[:, 0] *= width` CALLER ke array ko
+    in-place badal deta hai. Isse do bugs aate hain: (a) request ke dauran
+    `ordered_norm` pixels me badal jaata hai, to response ka `corners` field
+    0.25 bhejne ke bajaye 400.0 bhejta hai; (b) dobara scale karne par values
+    1600x ho jaati hain aur clip ke sarf 1599/1199 ho jaati hain.
+    """
+    pts = np.array(corners, dtype=np.float32, copy=True).reshape(4, 2)
+    pts[:, 0] *= width
+    pts[:, 1] *= height
+    return np.clip(pts, 0, [width - 1, height - 1])
+
+
+def prepare_page(img, max_side=None, corners=None):
+    """
+    Page ko warp karne ke liye taiyaar karo. Detection aur manual-corners dono
+    ke liye ek hi code path.
+
+    corners None  -> automatically detect karo (pehle wala behaviour)
+    corners given -> unhi par warp karo, detection bilkul skip
+
+    Returns dict:
+        page        - COLOR warped page (ndarray) - Preview screen isi ko dikhata hai
+        contour     - pixel coordinates jo use hue (4, 2)
+        detected    - True agar automatic detection ne page dhoondha
+        corners_norm- wahi 4 corners normalized TL/TR/BR/BL form me, source image
+                      ke hisaab se - client ke paas bhejne ke liye
+        scale       - resize factor jo `page` par laga (client ko pata chalega
+                      ki warped page source resolution se chhota ho sakta hai)
+    """
+    h, w = img.shape[:2]
+    scale = 1.0
+
+    work = img
+    if max_side and max(h, w) > max_side:
+        scale = max_side / max(h, w)
+        work = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+
+    if corners is None:
+        contour, used_fallback = scan_detection(work, return_fallback=True)
+        contour_px = np.asarray(contour, dtype=np.float32).reshape(4, 2)
+        detected = not used_fallback
+        # contour `work` (resized) par hai. Client ko SOURCE frame ke normalized
+        # corners chahiye, isliye pehle source pixels me wapas lao, phir 0..1
+        # me scale karo. Sirf /scale karna kaafi nahi tha - wo source pixels
+        # deta hai, normalized nahi.
+        contour_src = contour_px / scale
+        corners_norm = contour_src / np.array([w, h], dtype=np.float32)
+    else:
+        contour_px = scale_corners(corners, work.shape[1], work.shape[0])
+        # Client ne bheje hue corners pehle se normalized hain, aur validation
+        # ne 0..1 + convex + area guarantee kar diya hai. Order yahin set hota hai.
+        corners_norm = np.array(order_corners(np.asarray(corners, dtype=np.float32).reshape(4, 2)),
+                                dtype=np.float32)
+        detected = True
+
+    page = four_point_transform(work, contour_px)
+
+    return {
+        "page": page,
+        "contour": contour_px,
+        "detected": detected,
+        "corners_norm": corners_norm,
+        "scale": scale,
+    }
+
+
+# ---------------------------------------------------------------- enhancement
+
+def estimate_background(img):
+    """
+    Page ka background (paper) estimate karo - i.e. page ka wo roshni map jo
+    upar se neeche ya ek side se dusri side pe badalta hai.
+
+    Trick: `cv2.morphologyEx(..., MORPH_CLOSE)` ek bade kernel ke saath. Ye
+    bright regions ko expand karta hai aur dark regions ko fill karta hai, to
+    text/lines khatam ho jaate hain aur jo bacha wahi paper ka illumination hai.
+
+    Kernel size ko image ka ek fraction rakhna zaroori hai - fix 31px chhoti
+    image par poora paper ko "background" bana dega aur koi correction nahi hogi.
+    """
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    k = max(15, (min(gray.shape[:2]) // 12) | 1)  # odd lena zaroori
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+    return cv2.morphologyEx(gray, cv2.MORPH_CLOSE, kernel)
+
+
+def remove_shadow(img):
+    """
+    Uneven lighting hatao - division method.
+
+    har pixel ko apne local background se divide karo, phir 255 se scale karo.
+    Divide karne se paper ke andar ka contrast bacha rehta hai, sirf roshni ka
+    variation flat ho jaata hai.
+
+    Ye "crease elimination" nahi hai - ek sharp diagonal fold jo lighting nahi,
+    geometry hai, isse poori tarah nahi mita. Claim bhi nahi kiya jaata.
+    """
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    bg = estimate_background(img)
+    # divide karne se pehle background ko float me le jao - uint8 me zero
+    # division par silent zero aa jaata hai.
+    bg_f = bg.astype(np.float32) + 1.0
+    flat = np.clip(gray.astype(np.float32) * 255.0 / bg_f, 0, 255).astype(np.uint8)
+    return cv2.cvtColor(flat, cv2.COLOR_GRAY2BGR)
+
+
+def enhance(img, preset="original", shadow_removal=False):
+    """
+    Warped page par ek filter apply karo.
+
+    Presets:
+      original      - color, as-is (bas optional shadow removal)
+      grayscale     - single channel gray
+      bw            - Otsu, sirf 0 aur 255
+      bw_adaptive   - adaptive threshold, uneven page par better
+      clean_white   - background normalize karke paper ko safed, text dark
+
+    shadow_removal - upar wala desk-shadow removal, kisi bhi preset ke saath.
+
+    Return dict: {"image": ndarray, "channels": int}
+    `channels` 1 hoga grayscale/bw pe, 3 baaki me - client ko encoding ke liye
+    chahiye.
+    """
+    work = remove_shadow(img) if shadow_removal else img
+
+    if preset == "original":
+        out = work
+    elif preset == "grayscale":
+        out = cv2.cvtColor(work, cv2.COLOR_BGR2GRAY)
+    elif preset == "bw":
+        gray = cv2.cvtColor(work, cv2.COLOR_BGR2GRAY)
+        _, out = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    elif preset == "bw_adaptive":
+        gray = cv2.cvtColor(work, cv2.COLOR_BGR2GRAY)
+        out = cv2.adaptiveThreshold(
+            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 10
+        )
+    elif preset == "clean_white":
+        # Pehle lighting flat karo (guaranteed), phir se paper ko white push
+        # karne ke liye percentiles stretch karo - fixed threshold nahi, isiliye
+        # halki grey paper bhi white ho jaati hai bina text khoye.
+        flat = remove_shadow(work)
+        gray = cv2.cvtColor(flat, cv2.COLOR_BGR2GRAY)
+        lo, hi = np.percentile(gray, (2, 98))
+        if hi - lo < 1:  # khaali/flat page - stretch mat karo
+            out = gray
+        else:
+            stretched = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX)
+            out = np.clip((stretched.astype(np.float32) - 8) * 1.06, 0, 255).astype(np.uint8)
+    else:
+        raise ValueError(
+            f"unknown preset: {preset!r} (use 'original', 'grayscale', 'bw', "
+            f"'bw_adaptive' ya 'clean_white')"
+        )
+
+    channels = 1 if out.ndim == 2 else out.shape[2]
+    return {"image": out, "channels": channels}

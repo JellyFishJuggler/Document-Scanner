@@ -19,6 +19,13 @@ android/local.properties
 # toolchain downloads / sdk
 *.zip
 
-# React Native prototype (app/) - superseded by the Phase C PWA in web/.
-# Kept on disk, out of git. Say the word and I'll delete it instead.
-app/
+# React Native app - IN VERSION CONTROL (tracked as the Phase C starting point).
+# Only local/generated state below is ignored.
+app/node_modules/
+app/android/local.properties
+app/android/app/build/
+app/android/build/
+app/android/.gradle/
+app/ios/Pods/
+app/ios/build/
+app/.bundle/

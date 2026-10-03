@@ -1,8 +1,10 @@
 """Generate every fixture the test scripts need.
 
-All fixtures are SYNTHETIC and generated at runtime, except `real.png`, which is a
-copy of the one genuine phone photo in the repo (output/captured_frame.png). Real
-photos from test_fixtures/ are read but never copied here.
+Every fixture is SYNTHETIC and generated at runtime - including `photo.png`, which
+used to be a copy of the one genuine phone photo in the repo. It is now drawn from
+OpenCV primitives at the same 800x450 size, so the Phase A suites keep their exact
+expectations without any personal photograph being copied around. Real photos under
+test_fixtures/ are read in place but never copied.
 
 Includes hand-built EXIF orientation=6/8 JPEGs. That is deliberate: the API refuses
 to carry manual rotation code until there is proof that OpenCV's default
@@ -35,6 +37,30 @@ def exif_app1(orientation: int) -> bytes:
     segment = b"\xFF\xE1" + struct.pack(">H", len(payload) + 2) + payload
     assert len(segment) == 36, len(segment)
     return segment
+
+
+def synthetic_photo(w, h):
+    """A synthetic 'phone photo': a page on a desk, seen slightly off-axis.
+
+    Same job the old real.png copy did for the Phase A suites - an honest,
+    small, unrotated image that detection should find a document in - but built
+    from scratch so no personal photograph is duplicated on every fixture run.
+    """
+    img = np.full((h, w, 3), 72, np.uint8)
+    img[:, : int(0.18 * w)] = (96, 78, 58)          # desk strip down the left
+    img[int(0.88 * h):, :] = (88, 70, 52)           # desk strip along the bottom
+    page = np.array([[int(0.20 * w), int(0.10 * h)],
+                     [int(0.94 * w), int(0.16 * h)],
+                     [int(0.90 * w), int(0.94 * h)],
+                     [int(0.24 * w), int(0.88 * h)]], np.int32)
+    cv2.fillConvexPoly(img, page, (242, 241, 238))
+    cv2.rectangle(img, (int(0.27 * w), int(0.22 * h)),
+                  (int(0.84 * w), int(0.29 * h)), (42, 42, 46), -1)
+    for i in range(9):
+        y = int(0.36 * h) + i * int(0.055 * h)
+        cv2.rectangle(img, (int(0.27 * w), y),
+                      (int(0.80 * w) - (i % 3) * 60, y + 6), (72, 72, 78), -1)
+    return img
 
 
 def write_exif_jpeg(path, img, orientation):
@@ -99,10 +125,10 @@ def build_exif_with_thumbnail(thumb: bytes, main: bytes) -> bytes:
 
 
 def main():
-    real = cv2.imread(str(REPO / "output" / "captured_frame.png"))
-    assert real is not None, "output/captured_frame.png missing"
-    cv2.imwrite(str(FIX / "real.png"), real)
-    print(f"real.png            {real.shape}  <- copy of the repo's phone photo")
+    photo = synthetic_photo(800, 450)
+    cv2.imwrite(str(FIX / "photo.png"), photo)
+    print(f"photo.png           {photo.shape}  SYNTHETIC page-on-desk, 800x450 "
+          f"(replaces the old real.png copy of a personal photo)")
 
     flat = np.full((900, 1600, 3), 235, np.uint8)
     cv2.imwrite(str(FIX / "flat.png"), flat)

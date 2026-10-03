@@ -47,11 +47,12 @@ from typing import Literal
 import cv2
 import numpy as np
 from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ValidationError
 from starlette.concurrency import run_in_threadpool
 
-from scanner import scan_image
+from scanner import binarize, enhance, prepare_page, validate_corners
 
 # ---------------------------------------------------------------- config
 
@@ -70,7 +71,30 @@ MAX_DECODED_PIXELS = int(os.environ.get("MAX_DECODED_PIXELS", "50000000"))
 RATE_LIMIT_PER_MIN = int(os.environ.get("RATE_LIMIT_PER_MIN", "30"))
 MAX_CONCURRENT_SCANS = int(os.environ.get("MAX_CONCURRENT_SCANS", "2"))
 
+# CORS. Explicit origins - wildcard kabhi nahi.
+#
+# `ALLOWED_ORIGINS` comma-separated list hai. Default localhost:5173 (Vite dev
+# server ka port). Wildcard `*` isliye nahi, kyunki:
+#   1. isse koi bhi website hamare API par authenticated requests bhej sakti hai
+#   2. browser `Access-Control-Allow-Credentials: true` ke saath `*` ko reject
+#      karta hai, to wildcard cookies ke liye bhi kaam nahi karta
+# Aapke spec me credentials bhi nahi chahiye - API key header me jaata hai - to
+# allow_credentials=False sahi hai aur secure bhi.
+ALLOWED_ORIGINS = [
+    o.strip()
+    for o in os.environ.get("ALLOWED_ORIGINS", "http://localhost:5173").split(",")
+    if o.strip()
+]
+if not ALLOWED_ORIGINS:
+    raise SystemExit("ALLOWED_ORIGINS khaali nahi ho sakta - CORS ke liye kam se kam ek origin chahiye")
+if "*" in ALLOWED_ORIGINS:
+    raise SystemExit(
+        "ALLOWED_ORIGINS me '*' allowed nahi hai - koi bhi origin authenticated "
+        "requests bhej sakega. Explicit origins likho."
+    )
+
 Method = Literal["otsu", "adaptive"]
+Preset = Literal["original", "grayscale", "bw", "bw_adaptive", "clean_white"]
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("scanner.api")
@@ -123,13 +147,6 @@ def require_api_key(x_api_key: str | None) -> str:
     if not secrets.compare_digest(x_api_key, API_KEY):
         raise HTTPException(status_code=401, detail="X-API-Key galat hai")
     return hashlib.sha256(x_api_key.encode("utf-8")).hexdigest()
-
-
-def require_api_key(x_api_key: str | None) -> None:
-    if x_api_key is None:
-        raise HTTPException(status_code=401, detail="X-API-Key header missing hai")
-    if not secrets.compare_digest(x_api_key, API_KEY):
-        raise HTTPException(status_code=401, detail="X-API-Key galat hai")
 
 
 async def read_body_capped(request: Request, cap: int) -> tuple[bytes, bool]:
@@ -240,80 +257,24 @@ def sniff_format(data: bytes) -> str | None:
     return None
 
 
-def _is_pixel_limit_error(exc: cv2.error) -> bool:
+async def decode_and_guard(b64_image: str) -> tuple[np.ndarray, dict]:
     """
-    Har cv2.error pixel-limit nahi hota - corrupt data, truncated file, invalid
-    colour model, ye sab bhi cv2.error dete hain. 413 sirf usi error ke liye hai
-    jisme OpenCV ne khud pixel-limit assert kiya ho, warna galat image hai (400).
+    base64 -> bytes -> ndarray, saare guardrails ke saath. /scan aur /enhance dono
+    isko call karte hain - ek jagah se. Iska matlab security checks drift nahi kar
+    sakte: naya endpoint add karte waqt guardrails bhoolna structurally impossible
+    hai, kyunki dono endpoints literally yahi function call karte hain.
+
+    Order (Phase A me yahi order tai hua tha, wahi hai):
+      base64 -> khaali? -> magic bytes allow-list -> header pixel limit ->
+      decode -> post-decode pixel verify
+
+    Returns (decoded_bgr, timings) jahan timings me b64_decode aur decode ms hain.
     """
-    msg = str(exc)
-    return "CV_IO_MAX_IMAGE_PIXELS" in msg or "validateInputImageSize" in msg
-
-
-# ---------------------------------------------------------------- app
-
-app = FastAPI(
-    title="Scanly API",
-    version="1.0.0",
-    docs_url="/docs",
-    redoc_url=None,
-)
-
-
-class ScanRequest(BaseModel):
-    image: str
-    method: Method = "otsu"
-    max_side: int | None = 2000
-
-
-@app.get("/health")
-def health() -> dict:
-    return {
-        "ok": True,
-        "service": "scanly",
-        "version": "1.0.0",
-        "method": "classical computer vision",
-        "cv2": cv2.__version__,
-        "numpy": np.__version__,
-        "max_decoded_pixels": MAX_DECODED_PIXELS,
-    }
-
-
-@app.post("/scan")
-async def scan(
-    request: Request,
-    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
-) -> JSONResponse:
-    t_start = time.perf_counter()
-
-    # 1. API key. Iska opaque id rate-limit key banega - IP nahi. Hum Render ke proxy
-    #    ke peeche hain, aur X-Forwarded-For client khud bhar sakta hai, to uspar
-    #    bharosa nahi kiya jaata. API key wo cheez hai jo genuinely pehchanti hai.
-    key_id = require_api_key(x_api_key)
-
-    # 2. rate limit (API key ke hisaab se)
-    enforce_rate_limit(key_id)
-
-    # 3. body (bounded + drained, taaki oversized upload ko saaf 413 mile)
-    raw, overflow = await read_body_capped(request, MAX_BODY_BYTES)
-    if overflow:
-        raise HTTPException(status_code=413, detail="image 12MB se badi hai")
-    t_body_done = time.perf_counter()
-
-    # 4. parse
-    try:
-        payload = ScanRequest.model_validate_json(raw)
-    except ValidationError as exc:
-        raise HTTPException(status_code=422, detail=f"bad request body: {exc.errors()[0]['msg']}") from exc
-
-    if payload.max_side is not None and not (200 <= payload.max_side <= 6000):
-        raise HTTPException(status_code=422, detail="max_side 200 se 6000 ke beech hona chahiye")
-
-    # 5. base64 -> bytes -> image. IMREAD_COLOR default EXIF orientation apply karta
-    #    hai, isliye phone ki 6/8 wali rotated photos bhi seedha upright padhti hain.
+    # base64 -> bytes. IMREAD_COLOR default EXIF orientation apply karta hai,
+    # isliye phone ki 6/8 wali rotated photos bhi seedha upright padhti hain.
     t_b64 = time.perf_counter()
     try:
-        image_bytes = base64.b64decode(payload.image, validate=True)
+        image_bytes = base64.b64decode(b64_image, validate=True)
     except (binascii.Error, ValueError) as exc:
         raise HTTPException(status_code=400, detail="image base64 valid nahi hai") from exc
     b64_ms = (time.perf_counter() - t_b64) * 1000
@@ -321,16 +282,13 @@ async def scan(
     if not image_bytes:
         raise HTTPException(status_code=400, detail="image khaali hai")
 
-    # 6. format allow-list. Magic bytes decode se pehle - taaki unknown format
-    #    ka bada buffer kabhi decode attempt hi na ho.
+    # format allow-list. Magic bytes decode se pehle - taaki unknown format
+    # ka bada buffer kabhi decode attempt hi na ho.
     if sniff_format(image_bytes) is None:
-        raise HTTPException(
-            status_code=415,
-            detail="sirf JPEG ya PNG supported hai",
-        )
+        raise HTTPException(status_code=415, detail="sirf JPEG ya PNG supported hai")
 
-    # 7. pixel limit - header se, decode se PEHLE. Yahan koi allocation nahi hoti,
-    #    to chhoti file + bade dimensions wala bomb yahin ruk jaata hai.
+    # pixel limit - header se, decode se PEHLE. Yahan koi allocation nahi hoti,
+    # to chhoti file + bade dimensions wala bomb yahin ruk jaata hai.
     size = read_image_size(image_bytes)
     if size is not None:
         hdr_w, hdr_h = size
@@ -379,34 +337,152 @@ async def scan(
             src_w, src_h, src_h * src_w / 1e6, MAX_DECODED_PIXELS / 1e6,
         )
         raise HTTPException(status_code=413, detail=f"image {src_w}x{src_h} pixel limit cross karti hai")
-    decode_ms = (time.perf_counter() - t_decode) * 1000
 
-    # 7. scan (CPU heavy - threadpool mein, aur bounded concurrency ke saath)
+    return decoded, {
+        "b64_decode": round(b64_ms, 2),
+        "decode": round((time.perf_counter() - t_decode) * 1000, 2),
+    }
+
+
+def _is_pixel_limit_error(exc: cv2.error) -> bool:
+    """
+    Har cv2.error pixel-limit nahi hota - corrupt data, truncated file, invalid
+    colour model, ye sab bhi cv2.error dete hain. 413 sirf usi error ke liye hai
+    jisme OpenCV ne khud pixel-limit assert kiya ho, warna galat image hai (400).
+    """
+    msg = str(exc)
+    return "CV_IO_MAX_IMAGE_PIXELS" in msg or "validateInputImageSize" in msg
+
+
+# ---------------------------------------------------------------- app
+
+app = FastAPI(
+    title="Scanly API",
+    version="1.0.0",
+    docs_url="/docs",
+    redoc_url=None,
+)
+
+# CORS middleware. `expose_headers` taaki browser JS response headers padh sake,
+# `allow_headers` me X-API-Key zaroori hai warna preflight hi fail ho jaata hai.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "X-API-Key"],
+    max_age=600,
+)
+
+
+class ScanRequest(BaseModel):
+    image: str
+    method: Method = "otsu"
+    max_side: int | None = 2000
+    # Adjust Corners screen par user ne jo corners drag kiye. Normalized [0, 1],
+    # chaaron ka order koi bhi ho sakta hai - server TL/TR/BR/BL me order karega.
+    # None = automatic detection chalao (default, pehle wala behaviour).
+    corners: list[list[float]] | None = None
+
+
+class EnhanceRequest(BaseModel):
+    image: str
+    preset: Preset = "original"
+    shadow_removal: bool = False
+    # Output format. JPEG chhota hai (photos ke liye behtar), PNG lossless hai.
+    # Default JPEG quality 90 ke saath - document photos me visually lossless
+    # ke qareeb, par aadhi se bhi kam bytes.
+    output_format: Literal["jpeg", "png"] = "jpeg"
+    quality: int | None = None
+
+
+@app.get("/health")
+def health() -> dict:
+    return {
+        "ok": True,
+        "service": "scanly",
+        "version": "1.0.0",
+        "method": "classical computer vision",
+        "cv2": cv2.__version__,
+        "numpy": np.__version__,
+        "max_decoded_pixels": MAX_DECODED_PIXELS,
+        "allowed_origins": ALLOWED_ORIGINS,
+    }
+
+
+@app.post("/scan")
+async def scan(
+    request: Request,
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+) -> JSONResponse:
+    t_start = time.perf_counter()
+
+    # 1. API key. Iska opaque id rate-limit key banega - IP nahi. Hum Render ke proxy
+    #    ke peeche hain, aur X-Forwarded-For client khud bhar sakta hai, to uspar
+    #    bharosa nahi kiya jaata. API key wo cheez hai jo genuinely pehchanti hai.
+    key_id = require_api_key(x_api_key)
+
+    # 2. rate limit (API key ke hisaab se)
+    enforce_rate_limit(key_id)
+
+    # 3. body (bounded + drained, taaki oversized upload ko saaf 413 mile)
+    raw, overflow = await read_body_capped(request, MAX_BODY_BYTES)
+    if overflow:
+        raise HTTPException(status_code=413, detail="image 12MB se badi hai")
+    t_body_done = time.perf_counter()
+
+    # 4. parse
+    try:
+        payload = ScanRequest.model_validate_json(raw)
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=f"bad request body: {exc.errors()[0]['msg']}") from exc
+
+    if payload.max_side is not None and not (200 <= payload.max_side <= 6000):
+        raise HTTPException(status_code=422, detail="max_side 200 se 6000 ke beech hona chahiye")
+
+    # 5. corners validate karo (agar bheje gaye hain). ValueError -> 422.
+    #    Yahan decode se pehle, kyunki ye decision client ke input ka hai.
+    ordered_norm = None
+    if payload.corners is not None:
+        try:
+            ordered_norm = validate_corners(payload.corners)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    decoded, timings = await decode_and_guard(payload.image)
+
+    src_h, src_w = decoded.shape[:2]
+
+    # 7. warp + binarize (CPU heavy - threadpool mein, bounded concurrency ke saath).
+    #    `corners` None hua to automatic detection chalti hai; warna unhi
+    #    client-supplied corners par warp hota hai aur detection skip ho jaati hai.
     if not _scan_slots.acquire(timeout=30):
         raise HTTPException(status_code=503, detail="busy, thodi der baad try karo")
 
     try:
         t_scan = time.perf_counter()
-        result = await run_in_threadpool(
-            scan_image, decoded, max_side=payload.max_side, method=payload.method
+        warped = await run_in_threadpool(
+            prepare_page, decoded, payload.max_side, ordered_norm
         )
+        scan_img = await run_in_threadpool(binarize, warped["page"], payload.method)
         scan_ms = (time.perf_counter() - t_scan) * 1000
 
         t_enc = time.perf_counter()
-        encoded = await run_in_threadpool(encode_png_base64, result["scan"])
+        encoded = await run_in_threadpool(encode_png_base64, scan_img)
+        warped_b64 = await run_in_threadpool(encode_jpeg_base64, warped["page"])
         encode_ms = (time.perf_counter() - t_enc) * 1000
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     finally:
         _scan_slots.release()
 
-    scan_img = result["scan"]
-    used_fallback = result["used_fallback"]
+    warped_page = warped["page"]
+    used_fallback = not warped["detected"] and ordered_norm is None
 
     timing = {
         "body_read": round((t_body_done - t_start) * 1000, 2),
-        "b64_decode": round(b64_ms, 2),
-        "decode": round(decode_ms, 2),
+        "b64_decode": timings["b64_decode"],
+        "decode": timings["decode"],
         "scan": round(scan_ms, 2),
         "encode": round(encode_ms, 2),
         "total": round((time.perf_counter() - t_start) * 1000, 2),
@@ -414,27 +490,137 @@ async def scan(
 
     # image data kabhi log nahi hota - sirf dimensions aur timings
     log.info(
-        "scan ok method=%s in=%dx%d out=%dx%d fallback=%s ms=%s",
+        "scan ok method=%s in=%dx%d scan_out=%dx%d warped=%dx%d fallback=%s corners=%s ms=%s",
         payload.method,
         src_w,
         src_h,
         scan_img.shape[1],
         scan_img.shape[0],
+        warped_page.shape[1],
+        warped_page.shape[0],
         used_fallback,
+        "client" if ordered_norm is not None else "detected",
         timing,
     )
 
     return JSONResponse(
         {
             "ok": True,
+            # --- Phase A fields, unchanged ---
             "scan_b64": encoded,
             "scan_png_mime": "image/png",
             "used_fallback": used_fallback,
-            "detected": not used_fallback,
-            "contour": result["contour"].reshape(4, 2).tolist(),
+            "detected": warped["detected"],
+            "contour": warped["contour"].reshape(4, 2).tolist(),
             "source_size": [src_w, src_h],
             "scan_size": [int(scan_img.shape[1]), int(scan_img.shape[0])],
             "method": payload.method,
+            "timing_ms": timing,
+            # --- Phase B additions ---
+            # Corners normalized TL/TR/BR/BL me, source image ke hisaab se.
+            "corners": warped["corners_norm"].tolist(),
+            "corners_source": "client" if ordered_norm is not None else "detected",
+            # Asli COLOR warped page - Preview screen ye dikhata hai, filters
+            # isi par lagte hain. scan_b64 (B&W) ke alawa.
+            "warped_b64": warped_b64,
+            "warped_size": [int(warped_page.shape[1]), int(warped_page.shape[0])],
+            "warped_mime": "image/jpeg",
+        }
+    )
+
+
+@app.post("/enhance")
+async def enhance_endpoint(
+    request: Request,
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+) -> JSONResponse:
+    """
+    Warped page par ek filter. /scan ke wahi guardrails - shared helper se, to
+    security surface dono me identical hai.
+
+    Request:  {"image": "<b64>", "preset": "bw", "shadow_removal": false,
+               "output_format": "jpeg"}
+    Response: {"ok": true, "image_b64": ..., "mime": ..., "size": [w, h],
+               "channels": 1|3, "preset": ..., "shadow_removal": ..., "timing_ms": {...}}
+    """
+    t_start = time.perf_counter()
+
+    key_id = require_api_key(x_api_key)
+    enforce_rate_limit(key_id)
+
+    raw, overflow = await read_body_capped(request, MAX_BODY_BYTES)
+    if overflow:
+        raise HTTPException(status_code=413, detail="image 12MB se badi hai")
+    t_body_done = time.perf_counter()
+
+    try:
+        payload = EnhanceRequest.model_validate_json(raw)
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=f"bad request body: {exc.errors()[0]['msg']}") from exc
+
+    if payload.quality is not None and not (10 <= payload.quality <= 100):
+        raise HTTPException(status_code=422, detail="quality 10 se 100 ke beech hona chahiye")
+
+    decoded, timings = await decode_and_guard(payload.image)
+    src_h, src_w = decoded.shape[:2]
+
+    if not _scan_slots.acquire(timeout=30):
+        raise HTTPException(status_code=503, detail="busy, thodi der baad try karo")
+
+    try:
+        t_proc = time.perf_counter()
+        result = await run_in_threadpool(
+            enhance, decoded, preset=payload.preset, shadow_removal=payload.shadow_removal
+        )
+        proc_ms = (time.perf_counter() - t_proc) * 1000
+
+        t_enc = time.perf_counter()
+        if payload.output_format == "png":
+            b64, mime = await run_in_threadpool(encode_png_raw, result["image"])
+        else:
+            q = payload.quality if payload.quality is not None else 90
+            b64, mime = await run_in_threadpool(
+                encode_jpeg_raw, result["image"], q
+            )
+        encode_ms = (time.perf_counter() - t_enc) * 1000
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    finally:
+        _scan_slots.release()
+
+    out = result["image"]
+    timing = {
+        "body_read": round((t_body_done - t_start) * 1000, 2),
+        "b64_decode": timings["b64_decode"],
+        "decode": timings["decode"],
+        "enhance": round(proc_ms, 2),
+        "encode": round(encode_ms, 2),
+        "total": round((time.perf_counter() - t_start) * 1000, 2),
+    }
+
+    # Insaan padhne layak: sirf dimensions. Image data, filenames, EXIF - kuch nahi.
+    log.info(
+        "enhance ok preset=%s shadow=%s in=%dx%d out=%dx%d channels=%d ms=%s",
+        payload.preset,
+        payload.shadow_removal,
+        src_w,
+        src_h,
+        out.shape[1],
+        out.shape[0],
+        result["channels"],
+        timing,
+    )
+
+    return JSONResponse(
+        {
+            "ok": True,
+            "image_b64": b64,
+            "mime": mime,
+            "size": [int(out.shape[1]), int(out.shape[0])],
+            "channels": result["channels"],
+            "preset": payload.preset,
+            "shadow_removal": payload.shadow_removal,
+            "source_size": [src_w, src_h],
             "timing_ms": timing,
         }
     )
@@ -445,6 +631,24 @@ def encode_png_base64(img: np.ndarray) -> str:
     if not ok:
         raise ValueError("scan ko PNG me encode nahi kar paya")
     return base64.b64encode(buf.tobytes()).decode("ascii")
+
+
+def encode_jpeg_base64(img: np.ndarray, quality: int = 90) -> str:
+    return encode_jpeg_raw(img, quality)[0]
+
+
+def encode_jpeg_raw(img: np.ndarray, quality: int = 90) -> tuple[str, str]:
+    ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, quality])
+    if not ok:
+        raise ValueError("image ko JPEG me encode nahi kar paya")
+    return base64.b64encode(buf.tobytes()).decode("ascii"), "image/jpeg"
+
+
+def encode_png_raw(img: np.ndarray) -> tuple[str, str]:
+    ok, buf = cv2.imencode(".png", img)
+    if not ok:
+        raise ValueError("image ko PNG me encode nahi kar paya")
+    return base64.b64encode(buf.tobytes()).decode("ascii"), "image/png"
 
 
 if __name__ == "__main__":

@@ -60,34 +60,34 @@ print("1. auth")
 print("=" * 70)
 st, b = call("/health", key=None)
 check("GET /health without key", st == 200, f"-> {st}")
-st, b = call("/scan", {"image": b64("real.png")}, key=None)
+st, b = call("/scan", {"image": b64("photo.png")}, key=None)
 check("POST /scan without key -> 401", st == 401, f"-> {st} {b.get('detail','')[:40]}")
-st, b = call("/scan", {"image": b64("real.png")}, key="wrong-key")
+st, b = call("/scan", {"image": b64("photo.png")}, key="wrong-key")
 check("POST /scan wrong key -> 401", st == 401, f"-> {st} {b.get('detail','')[:40]}")
 
 print()
 print("=" * 70)
 print("2. happy path")
 print("=" * 70)
-st, b = call("/scan", {"image": b64("real.png")})
+st, b = call("/scan", {"image": b64("photo.png")})
 check("POST /scan -> 200", st == 200, f"-> {st}")
 if st == 200:
     print(f"    source_size {b['source_size']}  scan_size {b['scan_size']}")
     print(f"    detected={b['detected']}  used_fallback={b['used_fallback']}  method={b['method']}")
     print(f"    contour={b['contour']}")
-    with open(f"{FIX}/out_real.png", "wb") as f:
+    with open(f"{FIX}/out_photo.png", "wb") as f:
         f.write(base64.b64decode(b["scan_b64"]))
     check("response scan is decodable PNG", len(b["scan_b64"]) > 100)
     check("response has no file path / disk hint", "path" not in json.dumps(b).lower())
 
-st, b = call("/scan", {"image": b64("real.png"), "method": "adaptive"})
+st, b = call("/scan", {"image": b64("photo.png"), "method": "adaptive"})
 check("method=adaptive -> 200", st == 200, f"-> {st}")
 if st == 200:
-    with open(f"{FIX}/out_real_adaptive.png", "wb") as f:
+    with open(f"{FIX}/out_photo_adaptive.png", "wb") as f:
         f.write(base64.b64decode(b["scan_b64"]))
     check("adaptive differs from otsu", b["scan_b64"] != json.dumps("x"))
 
-st, b = call("/scan", {"image": b64("real.png"), "max_side": 400})
+st, b = call("/scan", {"image": b64("photo.png"), "max_side": 400})
 check("max_side=400 -> 200", st == 200, f"-> {st}")
 if st == 200:
     check("max_side actually bounds output", b["scan_size"][0] <= 420, f"scan_size={b['scan_size']}")
@@ -122,9 +122,9 @@ print("4. bad input")
 print("=" * 70)
 for label, body, want in [
     ("missing 'image' field", {"method": "otsu"}, 422),
-    ("bad method value", {"image": b64("real.png"), "method": "bogus"}, 422),
-    ("max_side too small", {"image": b64("real.png"), "max_side": 5}, 422),
-    ("max_side too big", {"image": b64("real.png"), "max_side": 99999}, 422),
+    ("bad method value", {"image": b64("photo.png"), "method": "bogus"}, 422),
+    ("max_side too small", {"image": b64("photo.png"), "max_side": 5}, 422),
+    ("max_side too big", {"image": b64("photo.png"), "max_side": 99999}, 422),
     ("image not base64", {"image": "!!!!not base64!!!!"}, 400),
     ("image empty string", {"image": ""}, 400),
     ("corrupt jpeg bytes", {"image": b64("corrupt.jpg")}, 400),
