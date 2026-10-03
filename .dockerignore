@@ -5,6 +5,12 @@
 !scanner.py
 !api.py
 !requirements.txt
+!web/
+!web/index.html
+!web/styles.css
+!web/app.mjs
+!web/api.mjs
+!web/geometry.mjs
 
 # belt-and-braces: inhe kabhi bhi mat bhejo
 .venv/

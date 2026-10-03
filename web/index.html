@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#f8f9fd" />
+    <meta name="scanly-api-base" content="" />
+    <title>Scanly — Document scanner</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <script type="module" src="/app.mjs"></script>
+  </head>
+  <body>
+    <main id="app" class="shell">
+      <header class="site-header">
+        <a class="wordmark" href="#home" aria-label="Scanly home">SCANLY<span>.</span></a>
+        <span class="header-note">A simpler way to scan</span>
+      </header>
+
+      <section id="home-screen" class="screen home-screen" aria-labelledby="home-title">
+        <div class="hero-copy">
+          <p class="eyebrow">YOUR DOCUMENT SCANNER</p>
+          <h1 id="home-title">Paper, made<br /><em>clear.</em></h1>
+          <p class="hero-description">Turn photos into clean digital documents.</p>
+          <div class="home-actions">
+            <button id="open-camera" class="button button-primary button-large" type="button">
+              <span class="camera-glyph" aria-hidden="true"></span>
+              Scan Document
+            </button>
+            <button id="upload-trigger" class="button button-secondary button-large" type="button">
+              <span aria-hidden="true">↑</span>
+              Upload Image
+            </button>
+            <input id="image-picker" class="visually-hidden" type="file" accept="image/jpeg,image/png,image/*" />
+          </div>
+          <p id="home-error" class="error-line" role="alert" hidden></p>
+          <p class="home-footnote">JPEG and PNG · Processed by classical computer vision</p>
+        </div>
+        <div class="paper-art" aria-hidden="true">
+          <div class="paper-shadow"></div>
+          <div class="paper-sheet">
+            <div class="paper-topline"><span></span><span></span></div>
+            <div class="paper-title-line"></div>
+            <div class="paper-copy-lines"><i></i><i></i><i></i><i></i><i></i><i></i></div>
+            <div class="paper-stamp">SCANLY<br /><b>01</b></div>
+            <div class="paper-copy-lines short"><i></i><i></i><i></i></div>
+          </div>
+          <span class="art-spark spark-one">✳</span>
+          <span class="art-spark spark-two">✳</span>
+        </div>
+      </section>
+
+      <section id="camera-screen" class="screen camera-screen" aria-label="Camera" hidden>
+        <div class="screen-heading screen-heading-light">
+          <button class="icon-button light-button" type="button" data-go-home aria-label="Go back">←</button>
+          <div><p class="eyebrow">CAPTURE</p><h1>Frame your page</h1></div>
+          <span class="heading-spacer"></span>
+        </div>
+        <div class="camera-frame">
+          <video id="camera-video" autoplay muted playsinline></video>
+          <div id="camera-message" class="camera-message" role="status">Starting camera…</div>
+          <div class="camera-guides" aria-hidden="true"><span></span><span></span><span></span><span></span></div>
+        </div>
+        <div class="camera-controls">
+          <label class="button button-camera-upload" for="camera-image-picker">Upload instead</label>
+          <input id="camera-image-picker" class="visually-hidden" type="file" accept="image/jpeg,image/png,image/*" />
+          <button id="capture-button" class="shutter-button" type="button" aria-label="Capture photo" disabled><span></span></button>
+          <span class="control-spacer"></span>
+        </div>
+      </section>
+
+      <section id="adjust-screen" class="screen adjust-screen" aria-labelledby="adjust-title" hidden>
+        <div class="screen-heading">
+          <button class="icon-button" type="button" data-go-home aria-label="Go back">←</button>
+          <div><p class="eyebrow">STEP 1 OF 2</p><h1 id="adjust-title">Adjust corners</h1></div>
+          <span class="heading-spacer"></span>
+        </div>
+        <p class="screen-intro">Move each point to the edge of the page. Scanly will straighten the selected area.</p>
+        <div id="image-stage" class="image-stage" aria-label="Image with adjustable document corners">
+          <img id="source-image" alt="Selected document" draggable="false" />
+          <svg id="corner-overlay" class="corner-overlay" role="group" aria-label="Document corners">
+            <polygon id="corner-polygon" points="" />
+            <g id="corner-handles"></g>
+          </svg>
+        </div>
+        <p id="adjust-status" class="status-line" role="status">Drag the four points to fit your page, or re-detect automatically.</p>
+        <p id="adjust-error" class="error-line" role="alert" hidden></p>
+        <div class="action-row">
+          <button id="redetect-button" class="button button-secondary" type="button">Re-detect</button>
+          <button id="continue-button" class="button button-primary" type="button">Continue <span aria-hidden="true">→</span></button>
+        </div>
+      </section>
+
+      <section id="preview-screen" class="screen preview-screen" aria-labelledby="preview-title" hidden>
+        <div class="screen-heading">
+          <button id="preview-back" class="icon-button" type="button" aria-label="Adjust corners">←</button>
+          <div><p class="eyebrow">STEP 2 OF 2</p><h1 id="preview-title">Your scan</h1></div>
+          <span class="heading-spacer"></span>
+        </div>
+        <p class="screen-intro">Your page has been straightened and is ready to save.</p>
+        <div class="preview-sheet"><img id="result-image" alt="Straightened scanned document" /></div>
+        <p id="preview-error" class="error-line" role="alert" hidden></p>
+        <div class="action-row preview-actions">
+          <button id="retake-button" class="button button-secondary" type="button">Retake</button>
+          <button id="adjust-again-button" class="button button-secondary" type="button">Adjust Corners</button>
+          <a id="download-button" class="button button-primary" download>Download <span aria-hidden="true">↓</span></a>
+        </div>
+      </section>
+
+      <footer class="site-footer"><span>SCANLY</span><span>Simple document scanning, right in your browser.</span></footer>
+    </main>
+  </body>
+</html>

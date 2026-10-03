@@ -47,6 +47,7 @@ import binascii
 import logging
 import threading
 import time
+from pathlib import Path
 from typing import Literal
 
 import cv2
@@ -54,6 +55,7 @@ import numpy as np
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError, model_validator
 from starlette.concurrency import run_in_threadpool
 
@@ -665,6 +667,11 @@ def encode_png_raw(img: np.ndarray) -> tuple[str, str]:
     if not ok:
         raise ValueError("image ko PNG me encode nahi kar paya")
     return base64.b64encode(buf.tobytes()).decode("ascii"), "image/png"
+
+
+# Serve the dependency-free browser client from the same origin as this API.
+# Keeping this mount last preserves the /health, /scan, and /enhance routes above.
+app.mount("/", StaticFiles(directory=Path(__file__).parent / "web", html=True), name="web")
 
 
 if __name__ == "__main__":

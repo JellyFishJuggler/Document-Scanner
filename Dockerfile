@@ -17,6 +17,7 @@ RUN pip install --no-cache-dir --no-compile -r requirements.txt
 # ---- app code ----
 WORKDIR /app
 COPY scanner.py api.py ./
+COPY web ./web
 
 # ---- non-root user: security ke liye ----
 RUN useradd --create-home --uid 10001 appuser
