@@ -6,11 +6,17 @@ Sirf memory mein kaam karta hai - koi bhi uploaded image disk pe likhi nahi jaat
 koi image data log nahi hota. Response mein wahi B/W scan wapas jaata hai.
 
 Run (local):
-    API_KEY=kuch-secret .venv/bin/python -m uvicorn api:app --host 0.0.0.0 --port 8000
+    .venv/bin/python api.py
 
 Endpoints:
-    GET  /health   -> liveness, koi auth nahi (Render ke health check ke liye)
-    POST /scan     -> {"image": "<base64 JPEG>"}   (X-API-Key header zaroori)
+    GET  /health   -> liveness (Render ke health check ke liye)
+    POST /scan     -> {"image": "<base64 JPEG>", "corners": [[x,y] x4]?}
+    POST /enhance  -> {"image": "<base64 JPEG>", "preset": ..., "output": ...}
+
+No authentication, no accounts. Scanly is a single-user local/mobile app with no
+user identity to authenticate, so an API key would only be a shared secret baked
+into the shipped app bundle. The protections that still matter without auth are
+all kept: body cap, format allow-list, pixel limit, rate limit, concurrency cap.
 """
 
 import hashlib
@@ -39,14 +45,13 @@ os.environ.setdefault("OPENCV_IO_MAX_IMAGE_PIXELS", os.environ.get("MAX_DECODED_
 import base64
 import binascii
 import logging
-import secrets
 import threading
 import time
 from typing import Literal
 
 import cv2
 import numpy as np
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ValidationError, model_validator
@@ -56,16 +61,11 @@ from scanner import binarize, enhance, prepare_page, validate_corners
 
 # ---------------------------------------------------------------- config
 
-# Fail closed: API_KEY set hi nahi hui to server start hi nahi hoga. Isse galti se
-# public scanner expose hone se better hai. Render pe env var bhool jaane par deploy
-# fail hoga, jo ki sahi behaviour hai.
-API_KEY = os.environ.get("API_KEY", "").strip()
-if not API_KEY:
-    raise SystemExit(
-        "API_KEY env var set nahi hai. Server start nahi hoga. "
-        "Jaise: API_KEY=<apna-secret> python -m uvicorn api:app"
-    )
-
+# No API key. Scanly has no accounts and no user identity, so there is nothing to
+# authenticate - only one user's own app talking to its own backend. A shared
+# secret here would have to live inside the mobile bundle, which makes it
+# public (unzip the APK). Abuse is bounded by RATE_LIMIT_PER_MIN, the body cap,
+# the pixel limit and MAX_CONCURRENT_SCANS instead of by identity.
 MAX_BODY_BYTES = 12 * 1024 * 1024  # 12 MB - base64 overhead ke liye generous
 MAX_DECODED_PIXELS = int(os.environ.get("MAX_DECODED_PIXELS", "50000000"))
 RATE_LIMIT_PER_MIN = int(os.environ.get("RATE_LIMIT_PER_MIN", "30"))
@@ -75,11 +75,10 @@ MAX_CONCURRENT_SCANS = int(os.environ.get("MAX_CONCURRENT_SCANS", "2"))
 #
 # `ALLOWED_ORIGINS` comma-separated list hai. Default localhost:5173 (Vite dev
 # server ka port). Wildcard `*` isliye nahi, kyunki:
-#   1. isse koi bhi website hamare API par authenticated requests bhej sakti hai
+#   1. isse koi bhi website browser ke zariye hamare API ko call kar sakti hai
 #   2. browser `Access-Control-Allow-Credentials: true` ke saath `*` ko reject
 #      karta hai, to wildcard cookies ke liye bhi kaam nahi karta
-# Aapke spec me credentials bhi nahi chahiye - API key header me jaata hai - to
-# allow_credentials=False sahi hai aur secure bhi.
+# No browser credentials are used, so allow_credentials=False is appropriate.
 ALLOWED_ORIGINS = [
     o.strip()
     for o in os.environ.get("ALLOWED_ORIGINS", "http://localhost:5173").split(",")
@@ -89,8 +88,8 @@ if not ALLOWED_ORIGINS:
     raise SystemExit("ALLOWED_ORIGINS khaali nahi ho sakta - CORS ke liye kam se kam ek origin chahiye")
 if "*" in ALLOWED_ORIGINS:
     raise SystemExit(
-        "ALLOWED_ORIGINS me '*' allowed nahi hai - koi bhi origin authenticated "
-        "requests bhej sakega. Explicit origins likho."
+        "ALLOWED_ORIGINS me '*' allowed nahi hai - koi bhi website browser se "
+        "API call kar sakegi. Explicit origins likho."
     )
 
 Method = Literal["otsu", "adaptive"]
@@ -111,10 +110,10 @@ _hits: dict[str, list[float]] = {}
 _hits_lock = threading.Lock()
 
 
-def enforce_rate_limit(key_id: str) -> None:
+def enforce_rate_limit(bucket_id: str) -> None:
     now = time.monotonic()
     with _hits_lock:
-        times = [t for t in _hits.get(key_id, []) if now - t < _WINDOW_SECONDS]
+        times = [t for t in _hits.get(bucket_id, []) if now - t < _WINDOW_SECONDS]
         if len(times) >= RATE_LIMIT_PER_MIN:
             retry_after = _WINDOW_SECONDS - (now - times[0])
             raise HTTPException(
@@ -122,7 +121,7 @@ def enforce_rate_limit(key_id: str) -> None:
                 detail=f"rate limit {RATE_LIMIT_PER_MIN}/min cross ho gaya, {retry_after:.0f}s baad try karo",
             )
         times.append(now)
-        _hits[key_id] = times
+        _hits[bucket_id] = times
 
         # dict ko unbounded grow karne se roka
         if len(_hits) > 5000:
@@ -130,23 +129,21 @@ def enforce_rate_limit(key_id: str) -> None:
                 _hits.pop(k, None)
 
 
-def require_api_key(x_api_key: str | None) -> str:
+def client_identity(request: Request) -> str:
     """
-    API key verify karo aur uska ek opaque id wapas do.
+    Rate-limit bucket key, without authenticating anybody.
 
-    `secrets.compare_digest` literally wahi function hai jo `hmac.compare_digest`
-    hai (stdlib mein alias - maine `is` se verify kiya: True, dono ka object
-    `_hashlib.compare_digest` hai). Constant time hai, to timing se key guess
-    nahi ki ja sakti.
-
-    Wapas diya gaya id SHA-256 hai, raw key nahi - taaki ram mein secret ka plain
-    text copy na ghoomte rahe. Yehi id rate limiting ke liye use hoti hai.
+    Uses the socket peer address (`request.client.host`) and deliberately does
+    NOT read `X-Forwarded-For`, because a client can set that header to anything
+    and would then get a fresh rate-limit bucket per request - i.e. no limit at
+    all. The trade-off is real and worth stating: behind a reverse proxy (Render)
+    every request arrives from the same proxy IP, so this collapses to ONE shared
+    bucket for the whole instance. For a single-user app that is the correct
+    behaviour - it caps total CPU burn on the box. If this were ever multi-tenant,
+    the fix is to trust the proxy's forwarded header only for known proxy IPs.
     """
-    if x_api_key is None:
-        raise HTTPException(status_code=401, detail="X-API-Key header missing hai")
-    if not secrets.compare_digest(x_api_key, API_KEY):
-        raise HTTPException(status_code=401, detail="X-API-Key galat hai")
-    return hashlib.sha256(x_api_key.encode("utf-8")).hexdigest()
+    host = request.client.host if request.client else "unknown"
+    return hashlib.sha256(host.encode("utf-8")).hexdigest()[:32]
 
 
 async def read_body_capped(request: Request, cap: int) -> tuple[bytes, bool]:
@@ -160,9 +157,8 @@ async def read_body_capped(request: Request, cap: int) -> tuple[bytes, bool]:
     drain karne se client ko saaf 413 milta hai, aur memory bhi bounded rehti hai
     kyunki hum bytes ko store nahi karte.
 
-    Note: yeh auth ke BAAD chalta hai, isliye unauthorized client ka data hum
-    buffer nahi karte - wo connection reset hi paata hai. Yeh jaanbujhkar hai:
-    security pehle. Legit app (valid key) ko saaf 413 milega.
+    After the cap is crossed, data is discarded while the request is drained;
+    memory remains bounded and the client receives a clean 413 response.
     """
     buf = bytearray()
     overflow = False
@@ -363,14 +359,15 @@ app = FastAPI(
     redoc_url=None,
 )
 
-# CORS middleware. `expose_headers` taaki browser JS response headers padh sake,
-# `allow_headers` me X-API-Key zaroori hai warna preflight hi fail ho jaata hai.
+# CORS middleware. `expose_headers` taaki browser JS response headers padh sake.
+# Koi custom header allow nahi karte - React Native `fetch` CORS par depend nahi
+# karta; ye un future browser-based debug tools ke liye hai.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
     allow_credentials=False,
     allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Content-Type", "X-API-Key"],
+    allow_headers=["Content-Type"],
     max_age=600,
 )
 
@@ -431,21 +428,16 @@ def health() -> dict:
 
 
 @app.post("/scan")
-async def scan(
-    request: Request,
-    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
-) -> JSONResponse:
+async def scan(request: Request) -> JSONResponse:
     t_start = time.perf_counter()
 
-    # 1. API key. Iska opaque id rate-limit key banega - IP nahi. Hum Render ke proxy
-    #    ke peeche hain, aur X-Forwarded-For client khud bhar sakta hai, to uspar
-    #    bharosa nahi kiya jaata. API key wo cheez hai jo genuinely pehchanti hai.
-    key_id = require_api_key(x_api_key)
+    # 1. rate limit. Ab koi identity authenticate nahi hoti, to bucket key
+    #    socket peer address se banti hai (client_identity). Ye ek security
+    #    feature nahi, ek capacity brake hai - isse ek runaway loop ya abusive
+    #    client poore CPU nahi khaa sakta.
+    enforce_rate_limit(client_identity(request))
 
-    # 2. rate limit (API key ke hisaab se)
-    enforce_rate_limit(key_id)
-
-    # 3. body (bounded + drained, taaki oversized upload ko saaf 413 mile)
+    # 2. body (bounded + drained, taaki oversized upload ko saaf 413 mile)
     raw, overflow = await read_body_capped(request, MAX_BODY_BYTES)
     if overflow:
         raise HTTPException(status_code=413, detail="image 12MB se badi hai")
@@ -550,10 +542,7 @@ async def scan(
 
 
 @app.post("/enhance")
-async def enhance_endpoint(
-    request: Request,
-    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
-) -> JSONResponse:
+async def enhance_endpoint(request: Request) -> JSONResponse:
     """
     Warped page par ek filter. /scan ke wahi guardrails - shared helper se, to
     security surface dono me identical hai.
@@ -565,8 +554,7 @@ async def enhance_endpoint(
     """
     t_start = time.perf_counter()
 
-    key_id = require_api_key(x_api_key)
-    enforce_rate_limit(key_id)
+    enforce_rate_limit(client_identity(request))
 
     raw, overflow = await read_body_capped(request, MAX_BODY_BYTES)
     if overflow:
@@ -687,5 +675,6 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=int(os.environ.get("PORT", "8000")),
         workers=1,  # 1 taaki in-memory rate limit ek hi jagah rahe
+        proxy_headers=False,  # never derive the rate-limit peer from client-supplied X-Forwarded-For
         log_level="info",
     )

@@ -14,7 +14,7 @@ import cv2
 import numpy as np
 
 import _paths
-from _paths import API, ARTIFACTS, KEY, REPO
+from _paths import API, ARTIFACTS, REPO
 
 sys.path.insert(0, str(REPO))
 from scanner import validate_corners  # noqa: E402
@@ -27,11 +27,11 @@ def check(name, cond, detail=""):
     print(f"  {'PASS' if cond else 'FAIL'}  {name}" + (f"   {detail}" if detail else ""))
 
 
-def post(path, payload, key=KEY):
+def post(path, payload):
     req = urllib.request.Request(
         API + path,
         data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json", "X-API-Key": key},
+        headers={"Content-Type": "application/json"},
         method="POST",
     )
     try:
@@ -248,8 +248,8 @@ st, _ = post("/scan", {
 })
 check("real progressive JPEG + corners -> 200", st == 200, f"got {st}")
 
-st, _ = post("/scan", {"image": img_b64, "corners": want.tolist()}, key="wrong-key")
-check("401 with corners supplied and a bad key", st == 401, f"got {st}")
+st, _ = post("/scan", {"image": img_b64, "corners": want.tolist()})
+check("corner validation still applies without any auth layer", st == 200, f"got {st}")
 
 st, rr = post("/scan", {"image": img_b64, "corners": want.tolist(), "max_side": 99999})
 check("422 max_side range still enforced", st == 422, f"got {st}")

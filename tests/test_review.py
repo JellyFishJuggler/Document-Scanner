@@ -23,11 +23,10 @@ import urllib.error
 import urllib.request as rq
 
 BASE = _paths.API
-KEY = _paths.KEY
 FIX = _paths.FIX
 
 fails = []
-VALID_OK = []  # valid API key ke saath /scan calls: (status, monotonic time)
+VALID_OK = []  # har /scan call: (status, monotonic time)
 WINDOW = 60.0
 
 
@@ -38,7 +37,9 @@ def worst_window(entries, window=WINDOW):
     andar admit karta hai. Ye function client side par wahi count nikalta hai,
     timestamps ke basis par - run ki total duration se independent.
     """
-    times = sorted(t for st, t in entries if st != 429)
+    # 0 is a transport failure, not an observed server response. Report those
+    # separately instead of counting them as requests admitted by the limiter.
+    times = sorted(t for st, t in entries if st not in (0, 429))
     worst = 0
     j = 0
     for i in range(len(times)):
@@ -54,7 +55,7 @@ def check(label, cond, extra=""):
         fails.append(label)
 
 
-def post(name, key=KEY, **extra):
+def post(name, forwarded=None, **extra):
     """POST /scan. Transport hiccups par dobara try karta hai.
 
     Ye zaroori hai: podman ke port-forward kabhi kabhi connection reset kar
@@ -69,7 +70,8 @@ def post(name, key=KEY, **extra):
     status, payload = 0, {}
     for attempt in range(3):
         req = rq.Request(BASE + "/scan", data=json.dumps(body).encode(),
-                         headers={"Content-Type": "application/json", "X-API-Key": key},
+                         headers={"Content-Type": "application/json",
+                                  **({"X-Forwarded-For": forwarded} if forwarded else {})},
                          method="POST")
         try:
             with rq.urlopen(req, timeout=180) as r:
@@ -84,8 +86,7 @@ def post(name, key=KEY, **extra):
         except Exception as e:
             status, payload = 0, {"transport": f"{e} (attempt {attempt + 1}/3)"}
             time.sleep(0.5)
-    if key == KEY:
-        VALID_OK.append((status, time.monotonic()))
+    VALID_OK.append((status, time.monotonic()))
     return status, payload
 
 
@@ -127,18 +128,33 @@ if st == 200:
 
 print()
 print("=" * 74)
-print("POINT 2: rate limit keyed on API key, NOT IP")
+print("POINT 2: rate limit cannot be bypassed with X-Forwarded-For")
 print("=" * 74)
-print("  Sab requests SAME IP se. Agar limit IP pe hoti, to 40 galat-key")
-print("  requests 429 dete aur valid key ka budget bhi khatam ho jaata.")
+print("  Auth hat gaya hai, to rate limit ab EK hi cheez hai jo runaway CPU")
+print("  rok sakti hai. Isliye usko spoof-proof hona zaroori hai.")
+print()
+print("  Agar bucket key X-Forwarded-For se banti, to ek attacker har request")
+print("  par ek naya 'IP' bhejkar unlimited quota nikal lega. Test yehi prove")
+print("  karta hai: 40 requests, har ek alag X-Forwarded-For, phir bhi EK hi")
+print("  budget hai aur 429 aata hai.")
 
-before = len([s for s, _ in VALID_OK if s == 200])
-codes = [post("flat.png", key="totally-wrong-key")[0] for _ in range(40)]
-after = len([s for s, _ in VALID_OK if s == 200])
-check("40 wrong-key requests -> all 401, zero 429",
-      codes.count(401) == 40 and codes.count(429) == 0, f"401={codes.count(401)} 429={codes.count(429)}")
-check("valid key's budget untouched by wrong-key flood",
-      before == after, f"valid 200s before={before} after={after}")
+# Sirf flood window ko measure karo, poori suite ko nahi - warna isse pehle ke
+# requests bhi jud jaate hain.
+flood_start = len(VALID_OK)
+codes = [post("flat.png", forwarded=f"203.0.113.{i}")[0] for i in range(40)]
+flood = VALID_OK[flood_start:]
+spoofed = [c for c in codes if c == 429]
+flood_peak = worst_window(flood)
+print(f"    spoofed flood: 40 requests, 40 distinct X-Forwarded-For values")
+print(f"      429s during flood        : {len(spoofed)}")
+print(f"      admitted during flood    : {len([1 for st, _ in flood if st != 429])}")
+print(f"      busiest 60s window in flood: {flood_peak}")
+check("40 requests with 40 different X-Forwarded-For still share ONE bucket",
+      len(spoofed) > 0, f"429s={len(spoofed)} of 40")
+check("the cap held DURING the spoofed flood", flood_peak <= 30,
+      f"peak={flood_peak} (max 30)")
+check("spoofing did not buy a fresh budget per request",
+      len(spoofed) >= 5, f"{len(spoofed)} of 40 spoofed requests were refused")
 
 seq = [post("flat.png")[0] for _ in range(32)]
 # Rate limiter un requests ko count karta hai jo limit ke andar ghare; 413/422 bhi
@@ -148,8 +164,8 @@ codes_all = [st for st, _ in VALID_OK]
 transport = sum(1 for st in codes_all if st == 0)
 peak = worst_window(VALID_OK)
 span = VALID_OK[-1][1] - VALID_OK[0][1]
-print(f"    valid-key sequence: 200s={seq.count(200)} 429s={seq.count(429)}")
-print(f"    whole suite ran {span:.1f}s, {len(codes_all)} valid-key requests total")
+print(f"    request sequence: 200s={seq.count(200)} 429s={seq.count(429)}")
+print(f"    whole suite ran {span:.1f}s, {len(codes_all)} requests total")
 print(f"    busiest 60s window anywhere in the suite: {peak} admitted")
 print(f"      (of all admitted: {codes_all.count(413)} were pixel-limit 413s, "
       f"{codes_all.count(200)} were 200s)")

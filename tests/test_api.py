@@ -6,25 +6,40 @@ import _paths
 import base64
 import json
 import sys
+import time
 import urllib.error
 import urllib.request
 import urllib.request as rq
 
 BASE = _paths.API
-KEY = _paths.KEY
 FIX = _paths.FIX
 
 fails = []
 SCAN_CALLS = []   # har /scan request ka status
-SCAN_VALID = []   # unme se sirf valid key wale (rate limit inhi pe lagta hai)
+SCAN_VALID = []   # har /scan call: (status, monotonic time) - rate limit inhi pe lagta hai
 
 
-def call(path, body=None, key=KEY, timeout=120):
+def worst_window(entries, window=60.0):
+    """Kisi bhi 60-second sliding window me sabse zyada kitne requests admit hue.
+
+    Rate limit ka contract yahi hai: "kisi bhi 60s window me 30 se zyada
+    admitted requests nahi". Cumulative total nahi - kyunki 60 se lambhe
+    suite me purane requests window se bahar nikal jaate hain aur quota free
+    ho jaati hai, jisse total 30 cross kar deta hai bina kisi violation ke.
+    """
+    times = sorted(t for st, t in entries if st not in (0, 429))
+    worst, j = 0, 0
+    for i in range(len(times)):
+        while times[i] - times[j] >= window:
+            j += 1
+        worst = max(worst, i - j + 1)
+    return worst
+
+
+def call(path, body=None, timeout=120):
     data = json.dumps(body).encode() if body is not None else None
     req = rq.Request(BASE + path, data=data, method="POST" if body is not None else "GET")
     req.add_header("Content-Type", "application/json")
-    if key:
-        req.add_header("X-API-Key", key)
     try:
         with rq.urlopen(req, timeout=timeout) as r:
             status, payload = r.status, json.loads(r.read())
@@ -39,8 +54,7 @@ def call(path, body=None, key=KEY, timeout=120):
         status, payload = 0, {"detail": f"transport: {e}"}
     if path == "/scan":
         SCAN_CALLS.append(status)
-        if key == KEY:
-            SCAN_VALID.append(status)
+        SCAN_VALID.append((status, time.monotonic()))
     return status, payload
 
 
@@ -56,14 +70,26 @@ def check(label, cond, extra=""):
 
 
 print("=" * 70)
-print("1. auth")
+print("1. no auth layer (this is the intended design)")
 print("=" * 70)
-st, b = call("/health", key=None)
-check("GET /health without key", st == 200, f"-> {st}")
-st, b = call("/scan", {"image": b64("photo.png")}, key=None)
-check("POST /scan without key -> 401", st == 401, f"-> {st} {b.get('detail','')[:40]}")
-st, b = call("/scan", {"image": b64("photo.png")}, key="wrong-key")
-check("POST /scan wrong key -> 401", st == 401, f"-> {st} {b.get('detail','')[:40]}")
+st, b = call("/health")
+check("GET /health with no credentials -> 200", st == 200, f"-> {st}")
+st, b = call("/scan", {"image": b64("photo.png")})
+check("POST /scan with no credentials -> 200", st == 200, f"-> {st}")
+
+# A stale client sending the old header must NOT get a 401. The header is simply
+# ignored now. This pins the removal: if someone re-adds auth later, this fails.
+req = rq.Request(BASE + "/scan",
+                 data=json.dumps({"image": b64("photo.png")}).encode(),
+                 method="POST")
+req.add_header("Content-Type", "application/json")
+req.add_header("X-API-Key", "an-irrelevant-leftover-secret")
+try:
+    with rq.urlopen(req, timeout=120) as r:
+        st_stale = r.status
+except urllib.error.HTTPError as e:
+    st_stale = e.code
+check("a stale X-API-Key header is ignored, not rejected", st_stale == 200, f"-> {st_stale}")
 
 print()
 print("=" * 70)
@@ -150,14 +176,21 @@ for i in range(34):
     codes.append(st)
 from collections import Counter
 c = Counter(codes)
-allowed = [s for s in SCAN_VALID if s != 429]
+allst = [st for st, _ in SCAN_VALID]
+allowed = [st for st in allst if st != 429]
+peak = worst_window(SCAN_VALID)
+span = SCAN_VALID[-1][1] - SCAN_VALID[0][1]
 print("    section 6 status counts:", dict(c))
-print(f"    valid-key /scan calls : {len(SCAN_VALID)}")
+print(f"    total /scan calls     : {len(SCAN_VALID)}")
 print(f"    of those, not 429     : {len(allowed)}")
-print(f"    429s                  : {SCAN_VALID.count(429)}")
-check("limit is exactly 30/min per API key", len(allowed) == 30, f"passed={len(allowed)} (want 30)")
-check("extra requests got 429", SCAN_VALID.count(429) >= 4, f"429s={SCAN_VALID.count(429)}")
-check("429 did NOT affect /health", call("/health", key=None)[0] == 200, "health stays open")
+print(f"    429s                  : {allst.count(429)}")
+print(f"    suite wall time       : {span:.1f}s")
+print(f"    busiest 60s window    : {peak} admitted  <-- the real contract")
+check("no 60s window exceeded 30 admitted /scan calls", peak <= 30, f"peak={peak} (max 30)")
+check("the cap is genuinely reached, not just permissive", peak >= 25,
+      f"peak={peak} (want >=25, taaki test 30 ke paas ja raha ho)")
+check("extra requests got 429", allst.count(429) >= 4, f"429s={allst.count(429)}")
+check("429 did NOT affect /health", call("/health")[0] == 200, "health stays open")
 
 print()
 print("=" * 70)

@@ -8,7 +8,6 @@ import base64, json, os, sys, urllib.error, urllib.request
 import cv2, numpy as np
 
 API = _paths.API
-KEY = _paths.KEY
 FIX = _paths.ARTIFACTS / "fmt"
 
 os.makedirs(FIX, exist_ok=True)
@@ -150,7 +149,7 @@ def load():
 def post(name, data):
     body = json.dumps({"image": base64.b64encode(data).decode()}).encode()
     r = urllib.request.Request(API + "/scan", data=body,
-                               headers={"Content-Type": "application/json", "X-API-Key": KEY},
+                               headers={"Content-Type": "application/json"},
                                method="POST")
     try:
         with urllib.request.urlopen(r, timeout=60) as resp:

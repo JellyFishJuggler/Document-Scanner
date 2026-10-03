@@ -33,7 +33,7 @@ import cv2
 import numpy as np
 
 import _paths
-from _paths import API, ARTIFACTS, KEY, REPO
+from _paths import API, ARTIFACTS, REPO
 
 RESULTS = []
 OUT = ARTIFACTS / "enhance"
@@ -46,11 +46,11 @@ def check(name, cond, detail=""):
     print(f"  {'PASS' if cond else 'FAIL'}  {name}" + (f"   {detail}" if detail else ""))
 
 
-def post(path, payload, key=KEY):
+def post(path, payload):
     req = urllib.request.Request(
         API + path,
         data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json", "X-API-Key": key},
+        headers={"Content-Type": "application/json"},
         method="POST",
     )
     try:
@@ -356,8 +356,20 @@ for label, data, want in (
     st, rr = post("/enhance", {"image": data})
     check(f"{label} enforced", st == want, f"got {st}")
 
-st, _ = post("/enhance", {"image": page_b64}, key="wrong-key")
-check("401 on a bad API key", st == 401, f"got {st}")
+# No auth layer: /enhance must be reachable with no credentials at all, and a
+# leftover X-API-Key header from an old client must be ignored (not 401).
+_req = urllib.request.Request(
+    API + "/enhance",
+    data=json.dumps({"image": page_b64}).encode(),
+    headers={"Content-Type": "application/json", "X-API-Key": "leftover-secret"},
+    method="POST",
+)
+try:
+    with urllib.request.urlopen(_req, timeout=180) as _r:
+        _st = _r.status
+except urllib.error.HTTPError as e:
+    _st = e.code
+check("no credentials needed, stale X-API-Key ignored", _st == 200, f"got {_st}")
 
 st, rr = post("/enhance", {"image": base64.b64encode(b"\x89PNG\r\n\x1a\n" + bytes(50)).decode()})
 check("400 on a truncated PNG", st == 400, f"got {st}")

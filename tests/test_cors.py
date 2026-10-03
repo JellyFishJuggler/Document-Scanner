@@ -9,7 +9,7 @@
 Section 5 (server refuses to start on a wildcard) cannot be tested over HTTP -
 the process has to boot and exit. It runs as a separate container start:
 
-    podman run --rm -e API_KEY=x -e ALLOWED_ORIGINS='*' scanly:test
+    podman run --rm -e ALLOWED_ORIGINS='*' scanly:test
     -> exits non-zero with "ALLOWED_ORIGINS me '*' allowed nahi hai"
 
 Verified separately; see the Phase B report.
@@ -24,7 +24,7 @@ import urllib.error
 import urllib.request
 
 import _paths
-from _paths import API, KEY, REPO
+from _paths import API, REPO
 
 RESULTS = []
 ALLOWED = "http://localhost:5173"
@@ -75,7 +75,7 @@ def preflight(path, origin):
     req = urllib.request.Request(API + path, method="OPTIONS")
     req.add_header("Origin", origin)
     req.add_header("Access-Control-Request-Method", "POST")
-    req.add_header("Access-Control-Request-Headers", "content-type,x-api-key")
+    req.add_header("Access-Control-Request-Headers", "content-type")
     try:
         with urllib.request.urlopen(req, timeout=30) as r:
             return r.status, headers_of(r)
@@ -120,7 +120,8 @@ methods = (h.get("access-control-allow-methods") or "").upper()
 check("POST is allowed", "POST" in methods, str(h.get("access-control-allow-methods")))
 check("OPTIONS is allowed", "OPTIONS" in methods, str(h.get("access-control-allow-methods")))
 hdrs = (h.get("access-control-allow-headers") or "").lower()
-check("X-API-Key header is allowed", "x-api-key" in hdrs, str(h.get("access-control-allow-headers")))
+check("no custom auth header is required any more", "x-api-key" not in hdrs,
+      str(h.get("access-control-allow-headers")))
 check("Content-Type header is allowed", "content-type" in hdrs,
       str(h.get("access-control-allow-headers")))
 check("max-age is set (so browsers do not re-preflight constantly)",
@@ -146,21 +147,21 @@ check("preflight from an unknown origin is refused",
 
 print()
 print("5. server refuses to start with a wildcard (fail closed)")
-# A wildcard would let any website send authenticated requests with our API key
+# A wildcard would let any website drive this server from a user's browser
 # in the background. The server must refuse to boot rather than fall open.
 proc = subprocess.run(
-    ["podman", "run", "--rm", "-e", f"API_KEY={KEY}", "-e", "ALLOWED_ORIGINS=*",
+    ["podman", "run", "--rm", "-e", "ALLOWED_ORIGINS=*",
      "scanly:test"],
     capture_output=True, text=True, timeout=180,
 )
 out = proc.stdout + proc.stderr
 check("exits non-zero on ALLOWED_ORIGINS='*'", proc.returncode != 0,
       f"returncode {proc.returncode}")
-check("explains why", "'*' allowed nahi hai" in out,
+check("explains why", "browser se" in out and "API call" in out,
       [ln for ln in out.splitlines() if "allowed" in ln][:2])
 
 proc2 = subprocess.run(
-    ["podman", "run", "--rm", "-e", f"API_KEY={KEY}", "-e", "ALLOWED_ORIGINS= , ",
+    ["podman", "run", "--rm", "-e", "ALLOWED_ORIGINS= , ",
      "scanly:test"],
     capture_output=True, text=True, timeout=180,
 )
@@ -200,7 +201,7 @@ free_port(PORT)
 subprocess.run(["podman", "rm", "-f", NAME], capture_output=True)
 
 proc3 = subprocess.run(
-    ["podman", "run", "--rm", "--name", NAME, "-e", f"API_KEY={KEY}",
+    ["podman", "run", "--rm", "--name", NAME,
      "-e", f"ALLOWED_ORIGINS={ALLOWED},https://app.scanly.app",
      "-p", f"{PORT}:8000", "-d", "scanly:test"],
     capture_output=True, text=True, timeout=180,
