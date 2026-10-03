@@ -4,7 +4,7 @@ import { FRAME_CORNERS, formatDownloadName, normalizePointer, sameCorners, valid
 const elements = Object.fromEntries([
   'home-screen', 'camera-screen', 'adjust-screen', 'preview-screen', 'open-camera',
   'upload-trigger', 'image-picker', 'home-error', 'camera-image-picker', 'camera-video',
-  'camera-message', 'capture-button', 'image-stage', 'source-image', 'corner-overlay',
+  'camera-message', 'capture-button', 'flip-camera-button', 'image-stage', 'source-image', 'corner-overlay',
   'corner-polygon', 'corner-handles', 'adjust-status', 'adjust-error', 'redetect-button',
   'continue-button', 'preview-back', 'result-image', 'preview-error', 'retake-button',
   'adjust-again-button', 'download-button',
@@ -19,6 +19,8 @@ let corners = FRAME_CORNERS.map(point => [...point]);
 let cornerSnapshot = null;
 let detectedResult = null;
 let stream = null;
+let cameraFacingMode = 'environment';
+let cameraSwitchInProgress = false;
 let draggingIndex = null;
 let scanInProgress = false;
 let downloadUrl = null;
@@ -38,6 +40,7 @@ function stopCamera() {
   stream = null;
   elements['camera-video'].srcObject = null;
   elements['capture-button'].disabled = true;
+  elements['flip-camera-button'].disabled = true;
 }
 
 function releaseCurrentImage() {
@@ -236,15 +239,38 @@ async function openCamera() {
     elements['camera-message'].textContent = cameraErrorMessage();
     return;
   }
+  cameraFacingMode = 'environment';
+  await startCameraStream();
+}
+
+async function startCameraStream() {
+  stopCamera();
+  elements['camera-message'].textContent = 'Starting camera…';
+  elements['camera-message'].hidden = false;
+  elements['flip-camera-button'].disabled = true;
   try {
-    stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: cameraFacingMode } },
+      audio: false,
+    });
     elements['camera-video'].srcObject = stream;
     await elements['camera-video'].play();
     elements['camera-message'].hidden = true;
     elements['capture-button'].disabled = false;
+    elements['flip-camera-button'].disabled = false;
+    elements['flip-camera-button'].setAttribute('aria-label', `Switch to ${cameraFacingMode === 'environment' ? 'front' : 'rear'} camera`);
   } catch (error) {
+    stopCamera();
     elements['camera-message'].textContent = cameraErrorMessage(error);
   }
+}
+
+async function flipCamera() {
+  if (cameraSwitchInProgress || !stream) return;
+  cameraSwitchInProgress = true;
+  cameraFacingMode = cameraFacingMode === 'environment' ? 'user' : 'environment';
+  await startCameraStream();
+  cameraSwitchInProgress = false;
 }
 
 async function captureFrame() {
@@ -281,6 +307,7 @@ function handleFile(file) {
 }
 
 elements['open-camera'].addEventListener('click', openCamera);
+elements['flip-camera-button'].addEventListener('click', flipCamera);
 elements['upload-trigger'].addEventListener('click', () => elements['image-picker'].click());
 elements['image-picker'].addEventListener('change', event => {
   const [file] = event.target.files || [];
