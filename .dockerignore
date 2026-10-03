@@ -1,0 +1,18 @@
+# Sirf api.py, scanner.py aur requirements.txt ko chahiye image ko.
+# .venv (~500MB) aur output/ build context mein aane se build slow ho jaata hai.
+
+*
+!scanner.py
+!api.py
+!requirements.txt
+
+# belt-and-braces: inhe kabhi bhi mat bhejo
+.venv/
+output/
+__pycache__/
+*.pyc
+*.png
+*.jpg
+*.jpeg
+mobile_camera.py
+main.py
