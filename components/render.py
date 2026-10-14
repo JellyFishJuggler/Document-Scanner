@@ -29,7 +29,7 @@ def render_scan(page, method="otsu"):
         except Exception:
             gray = cv2.cvtColor(page, cv2.COLOR_BGR2GRAY)
             binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
-            return {"image": binary, "channels": 1}
+            return {"image": cv2.bitwise_not(binary), "channels": 1}
 
     if method == "grayscale":
         try:

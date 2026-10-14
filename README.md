@@ -1,9 +1,10 @@
 # Scanly
 
 Scanly is a small browser-based document scanner. It turns a phone or computer
-photo into a straightened color page that can be downloaded as a JPEG. The
-backend uses classical computer vision through OpenCV; the browser handles image
-capture, corner adjustment, API requests, and download.
+photo into a straightened, cleaned-up page (black-and-white by default, inverted
+as white ink on a black background) that can be downloaded as a PNG. The backend
+uses classical computer vision through OpenCV; the browser handles image capture,
+corner adjustment, API requests, and download.
 
 The V1 flow is:
 
@@ -16,13 +17,16 @@ or package installation.
 
 - Responsive home, camera, corner adjustment, and preview screens.
 - Browser camera capture through `navigator.mediaDevices.getUserMedia()` with no
-  microphone access.
+  microphone access. It requests the highest resolution the device allows (up to
+  4K), uses continuous autofocus, and supports tap-to-focus with a short settle
+  delay before capture so text stays sharp.
 - JPEG and PNG image upload.
 - Four touch- and mouse-draggable page corners.
 - Optional server-side re-detection and perspective correction through `POST /scan`.
 - Preview and download both use the backend's processed `scan_b64` result, so they
   always match. The browser requests the B&W `otsu` mode; the backend normalizes
-  uneven lighting first, so shadows no longer turn into solid black slabs.
+  uneven lighting first, so shadows no longer turn into solid black slabs. The
+  binary result is inverted (white ink on a black background).
 - A small API client with request timeout, HTTP, network, and response validation.
 - No accounts, authentication, cloud storage, or saved server-side files.
 
@@ -32,7 +36,8 @@ or package installation.
 | -------------- | -------------------------------------------------------------------------------------- |
 | `web/`       | Dependency-free HTML, CSS, and JavaScript browser app.                                 |
 | `api.py`     | FastAPI routes, validation, resource limits, CORS, and static web serving.             |
-| `scanner.py` | OpenCV detection, corner validation, perspective transform, and enhancement functions. |
+| `scanner.py` | Thin facade that re-exports the OpenCV pipeline.                                        |
+| `components/`| Split pipeline modules: geometry, detection, corners, page prep, binarize, enhance, render. |
 | `tests/`     | Backend API and regression suites.                                                     |
 
 The browser does not implement image detection or perspective transformation.
@@ -76,7 +81,9 @@ possible.
   `corners_source`, `warped_b64`, `warped_size`, `warped_mime`, `scan_b64`, and
   `scan_mime`. Every mode first normalizes illumination, so uneven lighting and
   edge shadows no longer turn into black regions the way a raw global threshold
-  does.
+  does. The binary `otsu` and `adaptive` outputs are inverted (white ink on a
+  black background). The web app sends `max_side: 4000` (allowed range 200-6000)
+  so large pages stay sharp.
 - `POST /enhance` — backend enhancement presets. The V1 browser flow does not
   include a filters screen.
 
@@ -127,7 +134,9 @@ they exercise the rate limit.
 
 ## Limitations and scope
 
-The browser app provides one image per scan and a direct JPEG download. It does
+The browser app provides one image per scan and a direct PNG download (JPEG for
+non-binary modes). Captured frames are capped at a 4000px long side, so very
+dense pages on a distant camera may still want the page framed closer. It does
 not have a document library, multi-page scans, accounts, authentication, cloud
 sync, OCR, AI/ML, live edge tracking, confidence percentages, automatic capture,
 or document-specific modes. Detection may fall back to the full image when no

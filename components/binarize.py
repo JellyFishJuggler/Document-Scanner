@@ -52,18 +52,19 @@ def binarize_document(img, method="otsu"):
     """Shadow-corrected B&W: pehle illumination normalize, phir threshold.
 
     otsu = global, adaptive = local (block size image ke size ke hisaab se).
-    Strictly 0/255 return karta hai.
+    Output inverted hota hai - white ink, black background. Strictly 0/255.
     """
     gray = cv2.cvtColor(normalize_illumination(img), cv2.COLOR_BGR2GRAY)
     gray = cv2.GaussianBlur(gray, (3, 3), 0)  # denoise, taaki Otsu speckle na pakde
 
     if method == "otsu":
-        return cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
-
-    if method == "adaptive":
+        binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+    elif method == "adaptive":
         block = _odd(max(15, min(gray.shape[:2]) // 24))
-        return cv2.adaptiveThreshold(
+        binary = cv2.adaptiveThreshold(
             gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, block, 12
         )
+    else:
+        raise ValueError(f"unknown method: {method!r} (use 'otsu' ya 'adaptive')")
 
-    raise ValueError(f"unknown method: {method!r} (use 'otsu' ya 'adaptive')")
+    return cv2.bitwise_not(binary)

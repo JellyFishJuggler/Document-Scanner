@@ -4,7 +4,7 @@ import { FRAME_CORNERS, formatDownloadName, normalizePointer, sameCorners, valid
 const elements = Object.fromEntries([
   'home-screen', 'camera-screen', 'adjust-screen', 'preview-screen', 'open-camera',
   'upload-trigger', 'image-picker', 'home-error', 'camera-image-picker', 'camera-video',
-  'camera-message', 'capture-button', 'flip-camera-button', 'image-stage', 'source-image', 'corner-overlay',
+  'camera-message', 'capture-button', 'flip-camera-button', 'focus-ring', 'image-stage', 'source-image', 'corner-overlay',
   'corner-polygon', 'corner-handles', 'adjust-status', 'adjust-error', 'redetect-button',
   'continue-button', 'preview-back', 'result-image', 'preview-error', 'retake-button',
   'adjust-again-button', 'download-button',
@@ -14,6 +14,7 @@ const screens = [elements['home-screen'], elements['camera-screen'], elements['a
 const MAX_IMAGE_PIXELS = 50_000_000;
 const CAMERA_MAX_WIDTH = 3840;
 const CAMERA_MAX_HEIGHT = 2160;
+const CAPTURE_MAX_SIDE = 4000;
 const CAPTURE_SETTLE_MS = 350;
 let imageBlob = null;
 let imageUrl = null;
@@ -24,6 +25,7 @@ let detectedResult = null;
 let stream = null;
 let cameraFacingMode = 'environment';
 let cameraSwitchInProgress = false;
+let focusResetTimer = null;
 let draggingIndex = null;
 let scanInProgress = false;
 let downloadUrl = null;
@@ -39,6 +41,8 @@ function setError(target, message = '') {
 }
 
 function stopCamera() {
+  if (focusResetTimer) clearTimeout(focusResetTimer);
+  focusResetTimer = null;
   if (stream) stream.getTracks().forEach(track => track.stop());
   stream = null;
   elements['camera-video'].srcObject = null;
@@ -291,6 +295,47 @@ async function startCameraStream() {
   }
 }
 
+async function focusAt(x, y) {
+  const track = stream?.getVideoTracks?.()[0];
+  if (!track) return;
+  const caps = track.getCapabilities?.() || {};
+  const modes = caps.focusMode || [];
+  if (!modes.length) return;
+  const advanced = [];
+  if (caps.pointsOfInterest) advanced.push({ pointsOfInterest: [{ x, y }], focusMode: 'single-shot' });
+  else if (modes.includes('single-shot')) advanced.push({ focusMode: 'single-shot' });
+  else return;
+  try {
+    await track.applyConstraints({ advanced });
+  } catch {
+    return;
+  }
+  if (focusResetTimer) clearTimeout(focusResetTimer);
+  focusResetTimer = setTimeout(() => {
+    if (stream) track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }).catch(() => {});
+  }, 1800);
+}
+
+function showFocusRing(x, y) {
+  const ring = elements['focus-ring'];
+  ring.style.left = `${x}px`;
+  ring.style.top = `${y}px`;
+  ring.classList.remove('active');
+  void ring.offsetWidth;
+  ring.classList.add('active');
+}
+
+function handleCameraTap(event) {
+  if (elements['camera-screen'].hidden || !stream) return;
+  const rect = elements['camera-video'].getBoundingClientRect();
+  if (!rect.width || !rect.height) return;
+  showFocusRing(event.clientX - rect.left, event.clientY - rect.top);
+  void focusAt(
+    Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width)),
+    Math.min(1, Math.max(0, (event.clientY - rect.top) / rect.height)),
+  );
+}
+
 async function flipCamera() {
   if (cameraSwitchInProgress || !stream) return;
   cameraSwitchInProgress = true;
@@ -310,7 +355,7 @@ async function captureFrame() {
   try {
     // Autofocus/exposure ko settle hone do, warna blurry frame capture hota hai.
     await new Promise(resolve => setTimeout(resolve, CAPTURE_SETTLE_MS));
-    const scale = Math.min(1, 2000 / Math.max(video.videoWidth, video.videoHeight));
+    const scale = Math.min(1, CAPTURE_MAX_SIDE / Math.max(video.videoWidth, video.videoHeight));
     const canvas = document.createElement('canvas');
     canvas.width = Math.round(video.videoWidth * scale);
     canvas.height = Math.round(video.videoHeight * scale);
@@ -356,6 +401,7 @@ elements['camera-image-picker'].addEventListener('change', event => {
   event.target.value = '';
 });
 elements['capture-button'].addEventListener('click', () => { void captureFrame(); });
+elements['camera-video'].addEventListener('click', handleCameraTap);
 document.querySelectorAll('[data-go-home]').forEach(button => button.addEventListener('click', openHome));
 elements['redetect-button'].addEventListener('click', () => { void redetect(); });
 elements['continue-button'].addEventListener('click', () => { void continueToPreview(); });

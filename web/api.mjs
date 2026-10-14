@@ -82,7 +82,7 @@ export async function scan({ image, corners, timeoutMs } = {}) {
   }
 
   // B&W binary thresholding (server lighting normalize karke Otsu lagata hai).
-  const body = { image, method: 'otsu', max_side: 2000 };
+  const body = { image, method: 'otsu', max_side: 4000 };
   if (corners !== undefined) body.corners = corners;
   const data = await fetchJson('/scan', { method: 'POST', body, timeoutMs });
   return validateScanResponse(data);
