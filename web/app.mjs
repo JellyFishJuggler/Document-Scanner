@@ -4,7 +4,7 @@ import { FRAME_CORNERS, formatDownloadName, normalizePointer, sameCorners, valid
 const elements = Object.fromEntries([
   'home-screen', 'camera-screen', 'adjust-screen', 'preview-screen', 'open-camera',
   'upload-trigger', 'image-picker', 'home-error', 'camera-image-picker', 'camera-video',
-  'camera-message', 'capture-button', 'flip-camera-button', 'focus-ring', 'image-stage', 'source-image', 'corner-overlay',
+  'camera-message', 'capture-button', 'flip-camera-button', 'focus-ring', 'camera-frame', 'image-stage', 'source-image', 'corner-overlay',
   'corner-polygon', 'corner-handles', 'adjust-status', 'adjust-error', 'redetect-button',
   'continue-button', 'preview-back', 'result-image', 'preview-error', 'retake-button',
   'adjust-again-button', 'download-button',
@@ -38,6 +38,25 @@ function showScreen(screen) {
 function setError(target, message = '') {
   target.textContent = message;
   target.hidden = !message;
+}
+
+const DEBUG = new URLSearchParams(location.search).has('debug');
+const debugPanel = (() => {
+  if (!DEBUG) return null;
+  const panel = document.createElement('pre');
+  panel.style.cssText = 'position:fixed;left:0;right:0;bottom:0;max-height:44vh;overflow:auto;'
+    + 'margin:0;padding:8px 10px;background:rgba(0,0,0,.84);color:#7ef;z-index:9999;'
+    + 'font:11px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;pointer-events:none;';
+  document.body.appendChild(panel);
+  return panel;
+})();
+function dlog(label, value) {
+  const text = value === undefined ? '' : (typeof value === 'object' ? JSON.stringify(value) : String(value));
+  if (DEBUG && debugPanel) {
+    debugPanel.textContent += `${label}: ${text}\n`;
+    debugPanel.scrollTop = debugPanel.scrollHeight;
+  }
+  console.log('[scanly]', label, value);
 }
 
 function stopCamera() {
@@ -118,6 +137,13 @@ function setCurrentImage(blob, label) {
       return;
     }
     corners = FRAME_CORNERS.map(point => [...point]);
+    const rect = elements['source-image'].getBoundingClientRect();
+    dlog('setCurrentImage', {
+      natural: `${elements['source-image'].naturalWidth}x${elements['source-image'].naturalHeight}`,
+      displayed: `${Math.round(rect.width)}x${Math.round(rect.height)}`,
+      blobBytes: blob.size,
+      blobType: blob.type,
+    });
     elements['adjust-status'].textContent = 'Drag the four points to fit your page, or re-detect automatically.';
     setError(elements['adjust-error']);
     showScreen(elements['adjust-screen']);
@@ -158,8 +184,19 @@ function setScanBusy(busy, button, label) {
   if (button === elements['redetect-button']) elements['continue-button'].textContent = busy ? 'Scanning…' : 'Continue →';
 }
 
+function dlogScan(result) {
+  dlog('scan result', {
+    source_size: result.source_size,
+    warped_size: result.warped_size,
+    corners: result.corners,
+    used_fallback: result.used_fallback,
+    method: result.method,
+  });
+}
+
 function displayScan(result) {
   detectedResult = result;
+  dlogScan(result);
   corners = result.corners.map(point => [...point]);
   cornerSnapshot = corners.map(point => [...point]);
   elements['adjust-status'].textContent = result.used_fallback
@@ -175,7 +212,9 @@ async function redetect() {
   setScanBusy(true, elements['redetect-button'], 'Detecting…');
   elements['adjust-status'].textContent = 'Looking for the page…';
   try {
-    const result = await scan({ image: await getImageBase64() });
+    const image = await getImageBase64();
+    dlog('redetect request', { imageChars: image.length, corners: null });
+    const result = await scan({ image });
     displayScan(result);
   } catch (error) {
     elements['adjust-status'].textContent = 'Automatic detection could not be completed.';
@@ -193,6 +232,7 @@ function base64ToBlob(base64, mime) {
 }
 
 function showPreview(result) {
+  dlogScan(result);
   if (downloadUrl) URL.revokeObjectURL(downloadUrl);
   // Preview/download same processed image use karte hain (server ka scan_mime).
   const mime = result.scan_mime || 'image/png';
@@ -214,9 +254,12 @@ async function continueToPreview() {
   try {
     let result;
     if (detectedResult && sameCorners(corners, cornerSnapshot)) {
+      dlog('continue: reusing detected warp', { corners });
       result = detectedResult;
     } else {
-      result = await scan({ image: await getImageBase64(), corners });
+      const image = await getImageBase64();
+      dlog('continue request', { imageChars: image.length, corners });
+      result = await scan({ image, corners });
     }
     showPreview(result);
   } catch (error) {
@@ -256,15 +299,28 @@ async function openCamera() {
 async function applyBestEffortCameraSettings(stream) {
   const track = stream.getVideoTracks()[0];
   if (!track) return;
+  let caps = {};
   try {
-    const caps = track.getCapabilities?.() || {};
-    const constraints = { advanced: [] };
-    if (caps.focusMode?.includes('continuous')) constraints.advanced.push({ focusMode: 'continuous' });
-    if (caps.width?.max) constraints.width = { ideal: Math.min(CAMERA_MAX_WIDTH, caps.width.max) };
-    if (caps.height?.max) constraints.height = { ideal: Math.min(CAMERA_MAX_HEIGHT, caps.height.max) };
-    await track.applyConstraints(constraints);
+    caps = track.getCapabilities?.() || {};
   } catch {
-    // Device/browser ne upgrade reject kiya - jo mila hai wahi use karo.
+    caps = {};
+  }
+  const attempts = [];
+  if (caps.width?.max) {
+    attempts.push({
+      width: { ideal: Math.min(CAMERA_MAX_WIDTH, caps.width.max) },
+      height: { ideal: Math.min(CAMERA_MAX_HEIGHT, caps.height?.max || CAMERA_MAX_HEIGHT) },
+    });
+  }
+  if (caps.focusMode?.includes('continuous')) {
+    attempts.push({ advanced: [{ focusMode: 'continuous' }] });
+  }
+  for (const constraints of attempts) {
+    try {
+      await track.applyConstraints(constraints);
+    } catch {
+      // Device/browser ne ye upgrade reject kiya - baaki constraints try karo.
+    }
   }
 }
 
@@ -282,9 +338,24 @@ async function startCameraStream() {
       },
       audio: false,
     });
+    dlog('gUM requested', { facingMode: cameraFacingMode, width: CAMERA_MAX_WIDTH, height: CAMERA_MAX_HEIGHT });
+    const startTrack = stream.getVideoTracks()[0];
+    if (startTrack) {
+      try { dlog('track settings (pre-apply)', startTrack.getSettings()); } catch (error) { dlog('getSettings failed', error.message); }
+      try {
+        const caps = startTrack.getCapabilities?.() || {};
+        dlog('caps width/height', { width: caps.width, height: caps.height, aspectRatio: caps.aspectRatio });
+        dlog('caps focusMode', caps.focusMode);
+      } catch (error) { dlog('getCapabilities failed', error.message); }
+    }
     await applyBestEffortCameraSettings(stream);
+    const track = stream.getVideoTracks()[0];
+    if (track) {
+      try { dlog('track settings (post-apply)', track.getSettings()); } catch (error) { dlog('getSettings failed', error.message); }
+    }
     elements['camera-video'].srcObject = stream;
     await elements['camera-video'].play();
+    dlog('video after play', `${elements['camera-video'].videoWidth}x${elements['camera-video'].videoHeight}`);
     elements['camera-message'].hidden = true;
     elements['capture-button'].disabled = false;
     elements['flip-camera-button'].disabled = false;
@@ -298,26 +369,43 @@ async function startCameraStream() {
 async function focusAt(x, y) {
   const track = stream?.getVideoTracks?.()[0];
   if (!track) return;
-  const caps = track.getCapabilities?.() || {};
-  const modes = caps.focusMode || [];
-  if (!modes.length) return;
-  const advanced = [];
-  if (caps.pointsOfInterest) advanced.push({ pointsOfInterest: [{ x, y }], focusMode: 'single-shot' });
-  else if (modes.includes('single-shot')) advanced.push({ focusMode: 'single-shot' });
-  else return;
+  let caps = {};
   try {
-    await track.applyConstraints({ advanced });
+    caps = track.getCapabilities?.() || {};
   } catch {
-    return;
+    caps = {};
   }
+  const modes = caps.focusMode || [];
+  const point = [{ x, y }];
+  const attempts = [];
+  if (caps.pointsOfInterest) attempts.push([{ pointsOfInterest: point, focusMode: 'single-shot' }]);
+  if (modes.includes('single-shot')) attempts.push([{ focusMode: 'single-shot' }]);
+  if (caps.pointsOfInterest) attempts.push([{ pointsOfInterest: point, focusMode: 'manual' }]);
+  if (modes.includes('manual')) attempts.push([{ focusMode: 'manual' }]);
+  if (!attempts.length) attempts.push([{ focusMode: 'single-shot' }]);
+
+  let applied = false;
+  for (const advanced of attempts) {
+    try {
+      await track.applyConstraints({ advanced });
+      applied = true;
+      break;
+    } catch {
+      // Try the next constraint shape.
+    }
+  }
+  if (!applied) return;
   if (focusResetTimer) clearTimeout(focusResetTimer);
-  focusResetTimer = setTimeout(() => {
-    if (stream) track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }).catch(() => {});
-  }, 1800);
+  if (modes.includes('continuous')) {
+    focusResetTimer = setTimeout(() => {
+      if (stream) track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }).catch(() => {});
+    }, 1800);
+  }
 }
 
 function showFocusRing(x, y) {
   const ring = elements['focus-ring'];
+  if (!ring) return;
   ring.style.left = `${x}px`;
   ring.style.top = `${y}px`;
   ring.classList.remove('active');
@@ -361,6 +449,12 @@ async function captureFrame() {
     canvas.height = Math.round(video.videoHeight * scale);
     canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
     const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.9));
+    dlog('capture', {
+      video: `${video.videoWidth}x${video.videoHeight}`,
+      scale: Number(scale.toFixed(4)),
+      canvas: `${canvas.width}x${canvas.height}`,
+      blobBytes: blob ? blob.size : 0,
+    });
     if (!blob) {
       elements['camera-message'].hidden = false;
       elements['camera-message'].textContent = 'The photo could not be captured. Please try again.';
@@ -401,7 +495,15 @@ elements['camera-image-picker'].addEventListener('change', event => {
   event.target.value = '';
 });
 elements['capture-button'].addEventListener('click', () => { void captureFrame(); });
-elements['camera-video'].addEventListener('click', handleCameraTap);
+elements['camera-frame'].addEventListener('pointerdown', handleCameraTap);
+elements['camera-video'].addEventListener('loadedmetadata', () => {
+  const video = elements['camera-video'];
+  dlog('video metadata', {
+    intrinsic: `${video.videoWidth}x${video.videoHeight}`,
+    element: `${Math.round(video.clientWidth)}x${Math.round(video.clientHeight)}`,
+    fit: getComputedStyle(video).objectFit,
+  });
+});
 document.querySelectorAll('[data-go-home]').forEach(button => button.addEventListener('click', openHome));
 elements['redetect-button'].addEventListener('click', () => { void redetect(); });
 elements['continue-button'].addEventListener('click', () => { void continueToPreview(); });
