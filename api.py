@@ -59,7 +59,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError, model_validator
 from starlette.concurrency import run_in_threadpool
 
-from scanner import binarize, enhance, prepare_page, validate_corners
+from scanner import enhance, prepare_page, render_scan, validate_corners
 
 # ---------------------------------------------------------------- config
 
@@ -94,7 +94,8 @@ if "*" in ALLOWED_ORIGINS:
         "API call kar sakegi. Explicit origins likho."
     )
 
-Method = Literal["otsu", "adaptive"]
+# `/scan` output modes: otsu/adaptive (B&W), grayscale, enhanced (colour).
+Method = Literal["enhanced", "grayscale", "otsu", "adaptive"]
 Preset = Literal["original", "grayscale", "bw", "bw_adaptive", "clean_white"]
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -467,9 +468,8 @@ async def scan(request: Request) -> JSONResponse:
 
     src_h, src_w = decoded.shape[:2]
 
-    # 7. warp + binarize (CPU heavy - threadpool mein, bounded concurrency ke saath).
-    #    `corners` None hua to automatic detection chalti hai; warna unhi
-    #    client-supplied corners par warp hota hai aur detection skip ho jaati hai.
+    # 7. warp + render scan (CPU heavy - threadpool, bounded concurrency).
+    #    `corners` None hua to auto-detect, warna client corners par seedha warp.
     if not _scan_slots.acquire(timeout=30):
         raise HTTPException(status_code=503, detail="busy, thodi der baad try karo")
 
@@ -478,11 +478,16 @@ async def scan(request: Request) -> JSONResponse:
         warped = await run_in_threadpool(
             prepare_page, decoded, payload.max_side, ordered_norm
         )
-        scan_img = await run_in_threadpool(binarize, warped["page"], payload.method)
+        rendered = await run_in_threadpool(render_scan, warped["page"], payload.method)
+        scan_img = rendered["image"]
         scan_ms = (time.perf_counter() - t_scan) * 1000
 
         t_enc = time.perf_counter()
-        encoded = await run_in_threadpool(encode_png_base64, scan_img)
+        # Colour scan JPEG hota hai (PNG bahut bada ho jaata), B&W lossless PNG.
+        if rendered["channels"] == 3:
+            encoded, scan_mime = await run_in_threadpool(encode_jpeg_raw, scan_img, 92)
+        else:
+            encoded, scan_mime = await run_in_threadpool(encode_png_raw, scan_img)
         warped_b64 = await run_in_threadpool(encode_jpeg_base64, warped["page"])
         encode_ms = (time.perf_counter() - t_enc) * 1000
     except ValueError as exc:
@@ -522,7 +527,9 @@ async def scan(request: Request) -> JSONResponse:
             "ok": True,
             # --- Phase A fields, unchanged ---
             "scan_b64": encoded,
-            "scan_png_mime": "image/png",
+            # scan_mime asli mime; scan_png_mime purane clients ke liye same value.
+            "scan_png_mime": scan_mime,
+            "scan_mime": scan_mime,
             "used_fallback": used_fallback,
             "detected": warped["detected"],
             "contour": warped["contour"].reshape(4, 2).tolist(),
@@ -534,8 +541,7 @@ async def scan(request: Request) -> JSONResponse:
             # Corners normalized TL/TR/BR/BL me, source image ke hisaab se.
             "corners": warped["corners_norm"].tolist(),
             "corners_source": "client" if ordered_norm is not None else "detected",
-            # Asli COLOR warped page - Preview screen ye dikhata hai, filters
-            # isi par lagte hain. scan_b64 (B&W) ke alawa.
+            # Raw colour warped page (koi enhancement nahi), scan_b64 ke alawa.
             "warped_b64": warped_b64,
             "warped_size": [int(warped_page.shape[1]), int(warped_page.shape[0])],
             "warped_mime": "image/jpeg",

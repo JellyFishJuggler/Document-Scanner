@@ -187,11 +187,14 @@ function base64ToBlob(base64, mime) {
 
 function showPreview(result) {
   if (downloadUrl) URL.revokeObjectURL(downloadUrl);
-  const blob = base64ToBlob(result.scan_b64, 'image/png');
+  // Preview/download same processed image use karte hain (server ka scan_mime).
+  const mime = result.scan_mime || 'image/png';
+  const blob = base64ToBlob(result.scan_b64, mime);
   downloadUrl = URL.createObjectURL(blob);
   elements['result-image'].src = downloadUrl;
   elements['download-button'].href = downloadUrl;
-  elements['download-button'].download = formatDownloadName().replace(/\.jpg$/, '.png');
+  const extension = mime === 'image/jpeg' ? '.jpg' : '.png';
+  elements['download-button'].download = formatDownloadName().replace(/\.jpg$/, extension);
   setError(elements['preview-error']);
   showScreen(elements['preview-screen']);
 }

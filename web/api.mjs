@@ -81,6 +81,7 @@ export async function scan({ image, corners, timeoutMs } = {}) {
     throw new Error('Corner positions must be four normalized points.');
   }
 
+  // B&W binary thresholding (server lighting normalize karke Otsu lagata hai).
   const body = { image, method: 'otsu', max_side: 2000 };
   if (corners !== undefined) body.corners = corners;
   const data = await fetchJson('/scan', { method: 'POST', body, timeoutMs });

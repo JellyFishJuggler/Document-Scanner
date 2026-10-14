@@ -104,7 +104,8 @@ if st == 200:
     with open(f"{FIX}/out_photo.png", "wb") as f:
         f.write(base64.b64decode(b["scan_b64"]))
     check("response scan is decodable PNG", len(b["scan_b64"]) > 100)
-    check("response has no file path / disk hint", "path" not in json.dumps(b).lower())
+    meta = {k: v for k, v in b.items() if not k.endswith("_b64")}
+    check("response has no file path / disk hint", "path" not in json.dumps(meta).lower())
 
 st, b = call("/scan", {"image": b64("photo.png"), "method": "adaptive"})
 check("method=adaptive -> 200", st == 200, f"-> {st}")

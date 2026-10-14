@@ -20,18 +20,20 @@ or package installation.
 - JPEG and PNG image upload.
 - Four touch- and mouse-draggable page corners.
 - Optional server-side re-detection and perspective correction through `POST /scan`.
-- Color preview uses the backend's `warped_b64` result and downloads as a named JPEG.
+- Preview and download both use the backend's processed `scan_b64` result, so they
+  always match. The browser requests the B&W `otsu` mode; the backend normalizes
+  uneven lighting first, so shadows no longer turn into solid black slabs.
 - A small API client with request timeout, HTTP, network, and response validation.
 - No accounts, authentication, cloud storage, or saved server-side files.
 
 ## Architecture
 
-| Path | Responsibility |
-|---|---|
-| `web/` | Dependency-free HTML, CSS, and JavaScript browser app. |
-| `api.py` | FastAPI routes, validation, resource limits, CORS, and static web serving. |
+| Path           | Responsibility                                                                         |
+| -------------- | -------------------------------------------------------------------------------------- |
+| `web/`       | Dependency-free HTML, CSS, and JavaScript browser app.                                 |
+| `api.py`     | FastAPI routes, validation, resource limits, CORS, and static web serving.             |
 | `scanner.py` | OpenCV detection, corner validation, perspective transform, and enhancement functions. |
-| `tests/` | Backend API and regression suites. |
+| `tests/`     | Backend API and regression suites.                                                     |
 
 The browser does not implement image detection or perspective transformation.
 It sends the source image and normalized corners to the existing backend. The
@@ -69,8 +71,12 @@ possible.
 
 - `GET /health` — service health and runtime information.
 - `POST /scan` — accepts a JSON body containing base64 `image`, optional
-  normalized `corners`, and scan options. Returns `corners`, `corners_source`,
-  `warped_b64`, `warped_size`, `warped_mime`, and `scan_b64`.
+  normalized `corners`, and scan options (`method`: `otsu` (default for the web
+  app), `adaptive`, `grayscale`, or `enhanced`). Returns `corners`,
+  `corners_source`, `warped_b64`, `warped_size`, `warped_mime`, `scan_b64`, and
+  `scan_mime`. Every mode first normalizes illumination, so uneven lighting and
+  edge shadows no longer turn into black regions the way a raw global threshold
+  does.
 - `POST /enhance` — backend enhancement presets. The V1 browser flow does not
   include a filters screen.
 

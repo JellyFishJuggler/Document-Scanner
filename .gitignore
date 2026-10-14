@@ -12,6 +12,9 @@ test_fixtures/
 # generated test artifacts (before/after images, output scans)
 tests/_artifacts/
 
+# leftover pre-refactor reference copy (baseline_scan.py already holds this code)
+tests/main_original.py
+
 # local config
 android/local.properties
 *.local
