@@ -12,6 +12,9 @@ const elements = Object.fromEntries([
 
 const screens = [elements['home-screen'], elements['camera-screen'], elements['adjust-screen'], elements['preview-screen']];
 const MAX_IMAGE_PIXELS = 50_000_000;
+const CAMERA_MAX_WIDTH = 3840;
+const CAMERA_MAX_HEIGHT = 2160;
+const CAPTURE_SETTLE_MS = 350;
 let imageBlob = null;
 let imageUrl = null;
 let sourceBase64 = null;
@@ -246,6 +249,21 @@ async function openCamera() {
   await startCameraStream();
 }
 
+async function applyBestEffortCameraSettings(stream) {
+  const track = stream.getVideoTracks()[0];
+  if (!track) return;
+  try {
+    const caps = track.getCapabilities?.() || {};
+    const constraints = { advanced: [] };
+    if (caps.focusMode?.includes('continuous')) constraints.advanced.push({ focusMode: 'continuous' });
+    if (caps.width?.max) constraints.width = { ideal: Math.min(CAMERA_MAX_WIDTH, caps.width.max) };
+    if (caps.height?.max) constraints.height = { ideal: Math.min(CAMERA_MAX_HEIGHT, caps.height.max) };
+    await track.applyConstraints(constraints);
+  } catch {
+    // Device/browser ne upgrade reject kiya - jo mila hai wahi use karo.
+  }
+}
+
 async function startCameraStream() {
   stopCamera();
   elements['camera-message'].textContent = 'Starting camera…';
@@ -253,9 +271,14 @@ async function startCameraStream() {
   elements['flip-camera-button'].disabled = true;
   try {
     stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: { ideal: cameraFacingMode } },
+      video: {
+        facingMode: { ideal: cameraFacingMode },
+        width: { ideal: CAMERA_MAX_WIDTH },
+        height: { ideal: CAMERA_MAX_HEIGHT },
+      },
       audio: false,
     });
+    await applyBestEffortCameraSettings(stream);
     elements['camera-video'].srcObject = stream;
     await elements['camera-video'].play();
     elements['camera-message'].hidden = true;
@@ -283,18 +306,28 @@ async function captureFrame() {
     elements['camera-message'].textContent = 'Camera is not ready yet. Please wait a moment and try again.';
     return;
   }
-  const scale = Math.min(1, 2000 / Math.max(video.videoWidth, video.videoHeight));
-  const canvas = document.createElement('canvas');
-  canvas.width = Math.round(video.videoWidth * scale);
-  canvas.height = Math.round(video.videoHeight * scale);
-  canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
-  const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.9));
-  if (!blob) {
+  elements['capture-button'].disabled = true;
+  try {
+    // Autofocus/exposure ko settle hone do, warna blurry frame capture hota hai.
+    await new Promise(resolve => setTimeout(resolve, CAPTURE_SETTLE_MS));
+    const scale = Math.min(1, 2000 / Math.max(video.videoWidth, video.videoHeight));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round(video.videoWidth * scale);
+    canvas.height = Math.round(video.videoHeight * scale);
+    canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+    const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.9));
+    if (!blob) {
+      elements['camera-message'].hidden = false;
+      elements['camera-message'].textContent = 'The photo could not be captured. Please try again.';
+      elements['capture-button'].disabled = false;
+      return;
+    }
+    setCurrentImage(blob, 'Captured document');
+  } catch {
     elements['camera-message'].hidden = false;
     elements['camera-message'].textContent = 'The photo could not be captured. Please try again.';
-    return;
+    elements['capture-button'].disabled = false;
   }
-  setCurrentImage(blob, 'Captured document');
 }
 
 function handleFile(file) {
