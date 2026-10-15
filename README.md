@@ -72,6 +72,31 @@ The FastAPI `ALLOWED_ORIGINS` setting must include that frontend's exact origin.
 For production, serve the frontend and API from the same HTTPS origin where
 possible.
 
+## Run with Docker
+
+The `Dockerfile` packages the API and web app into one image (Python 3.12-slim,
+`opencv-python-headless`, running as a non-root user). It copies `api.py`,
+`scanner.py`, the `components/` package, and `web/`.
+
+```bash
+docker build -t scanly:latest .
+docker run --rm -p 8000:8000 scanly:latest
+```
+
+Then open [http://localhost:8000](http://localhost:8000).
+
+Behavior is configured with environment variables:
+
+- `PORT` — listening port (default `8000`).
+- `ALLOWED_ORIGINS` — comma-separated CORS origins (default
+  `http://localhost:5173`). The wildcard `*` is rejected at startup.
+- `RATE_LIMIT_PER_MIN` — requests per minute per client (default `30`).
+- `MAX_CONCURRENT_SCANS` — concurrent scan jobs (default `2`).
+- `MAX_DECODED_PIXELS` — decoded-image pixel ceiling (default `50000000`).
+
+The CORS container checks expect the image tagged `scanly:test`; build it as
+`docker build -t scanly:test .` before running `tests/test_cors.py`.
+
 ## API
 
 - `GET /health` — service health and runtime information.

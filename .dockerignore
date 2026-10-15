@@ -1,10 +1,12 @@
-# Sirf api.py, scanner.py aur requirements.txt ko chahiye image ko.
+# Sirf api.py, scanner.py, components/ aur requirements.txt ko chahiye image ko.
 # .venv (~500MB) aur output/ build context mein aane se build slow ho jaata hai.
 
 *
 !scanner.py
 !api.py
 !requirements.txt
+!components/
+!components/*.py
 !web/
 !web/index.html
 !web/styles.css
